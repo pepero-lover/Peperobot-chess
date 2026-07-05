@@ -1,0 +1,107 @@
+package com.pepero.peperobot.evaluation;
+
+import com.pepero.peperobot.Search;
+import com.pepero.jcb.core.Chessboard;
+import com.pepero.jcb.core.GameVariants;
+import com.pepero.jcb.encode.EncodeMove;
+
+import static com.pepero.jcb.constant.EncodedPieces.*;
+import static com.pepero.jcb.constant.SideToMove.white;
+
+public class ScoreMove {
+
+    // [수정됨] hash_move 파라미터 추가
+    public static int scoreMove(Search search, Chessboard chessboard, int move, int hash_move){
+
+        // [핵심] 해시 무브(이전 탐색 Best Move)라면 무조건 1순위 배정
+        if (move == hash_move && hash_move != 0) {
+            return 2000000;
+        }
+
+        if (search.score_pv) {
+            if(search.pv_table[0][search.ply] == move){
+                search.score_pv = false;
+                return 20000;
+            }
+        }
+
+        if (EncodeMove.getMoveCapture(move)){
+            int target_piece = P;
+            int start_piece, end_piece;
+
+            if(chessboard.side == white) {
+                start_piece = p;
+                end_piece = k;
+            } else {
+                start_piece = P;
+                end_piece = K;
+            }
+
+            long targetMask = 1L << EncodeMove.getMoveTarget(move);
+            for(int bb_piece = start_piece; bb_piece <= end_piece; bb_piece++){
+                if((chessboard.bitboards[bb_piece] & targetMask) != 0L){
+                    target_piece = bb_piece;
+                    break;
+                }
+            }
+
+            return MvvLva.MVV_LVA[EncodeMove.getMovePiece(move)][target_piece] + 10000;
+        } else {
+            if(search.killer_moves[0][search.ply] == move) return 9000;
+            else if(search.killer_moves[1][search.ply] == move) return 8000;
+            else return search.history_moves[EncodeMove.getMovePiece(move)][EncodeMove.getMoveTarget(move)];
+        }
+    }
+
+    // [수정됨] hash_move 파라미터 추가
+    public static void scoreMoves(Search search, Chessboard chessboard, int[] move_list, int move_count, int hash_move) {
+        for (int count = 0; count < move_count; count++){
+            search.move_scores[count] = scoreMove(search, chessboard, move_list[count], hash_move);
+        }
+    }
+
+    // Quiescence Search용 (여기서는 Hash Move를 신경 쓸 필요 없으므로 0 전달)
+    public static void scoreQuiescenceMoves(Search search, Chessboard chessboard, int[] move_list, int move_count) {
+        for (int count = 0; count < move_count; count++){
+            if (EncodeMove.getMoveCapture(move_list[count])) {
+                search.move_scores[count] = scoreMove(search, chessboard, move_list[count], 0);
+            } else {
+                search.move_scores[count] = -1000000; // 조용한 수는 QS에서 제외
+            }
+        }
+    }
+
+    public static int pickNextMove(Search search, int stepIndex, int move_count, int[] move_list) {
+        int bestIndex = stepIndex;
+        int bestScore = search.move_scores[stepIndex];
+
+        for (int i = stepIndex + 1; i < move_count; i++) {
+            if (search.move_scores[i] > bestScore) {
+                bestScore = search.move_scores[i];
+                bestIndex = i;
+            }
+        }
+
+        if (bestIndex != stepIndex) {
+            int tempMove = move_list[stepIndex];
+            move_list[stepIndex] = move_list[bestIndex];
+            move_list[bestIndex] = tempMove;
+
+            int tempScore = search.move_scores[stepIndex];
+            search.move_scores[stepIndex] = search.move_scores[bestIndex];
+            search.move_scores[bestIndex] = tempScore;
+        }
+
+        return move_list[stepIndex];
+    }
+
+    // 디버그용 출력 메서드 (hash_move 파라미터 추가)
+    public static void printMoveScores(Search search, Chessboard chessboard, int[] move_list, int move_count, int hash_move){
+        System.out.println("\n\n     Move scores\n");
+        boolean isChess960 = chessboard.gameVariants == GameVariants.CHESS960;
+        for(int count = 0; count < move_count; count++){
+            System.out.println("     move: " + EncodeMove.moveToString(move_list[count], isChess960) +
+                    " score : " + ScoreMove.scoreMove(search, chessboard, move_list[count], hash_move));
+        }
+    }
+}
