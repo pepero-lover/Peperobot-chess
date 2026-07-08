@@ -111,6 +111,17 @@ public class Search implements Runnable {
             return Evaluate.evaluate(chessboard);
         }
 
+        // --- TT probe (depth 0 = quiescence 전용 슬롯으로 취급) ---
+        int alpha_orig = alpha;
+
+        int tt_score = TranspositionTable.readHashEntry(this, chessboard, alpha, beta, 0);
+        if (tt_score != TranspositionTable.NO_HASH_ENTRY) {
+            return tt_score;
+        }
+
+        int hash_move = TranspositionTable.readHashMove(chessboard);
+        // --- TT probe 끝 ---
+
         boolean in_check = MoveGenerator.isSquareAttacked(chessboard,
                 chessboard.side == white ?
                         BitBoardUtils.getLS1BIndex(chessboard.bitboards[K]):
@@ -121,6 +132,7 @@ public class Search implements Runnable {
 
         if (!in_check) {
             if (evaluation >= beta) {
+                TranspositionTable.writeHashEntry(this, chessboard, beta, 0, TranspositionTable.HASH_FLAG_BETA, 0);
                 return beta;
             }
             if (evaluation > alpha) {
@@ -132,12 +144,13 @@ public class Search implements Runnable {
         int move_count = MoveGenerator.generateMoves(chessboard, move_list);
 
         if (in_check) {
-            ScoreMove.scoreMoves(this, chessboard, move_list, move_count, 0);
+            ScoreMove.scoreMoves(this, chessboard, move_list, move_count, hash_move);
         } else {
-            ScoreMove.scoreQuiescenceMoves(this, chessboard, move_list, move_count);
+            ScoreMove.scoreQuiescenceMoves(this, chessboard, move_list, move_count, hash_move);
         }
 
         int legal_moves = 0;
+        int tt_best_move = 0;
 
         for (int count = 0; count < move_count; count++) {
             int move = ScoreMove.pickNextMove(this, count, move_count, move_list);
@@ -176,7 +189,10 @@ public class Search implements Runnable {
 
             if (score > alpha) {
                 alpha = score;
+                tt_best_move = move;
+
                 if (score >= beta) {
+                    TranspositionTable.writeHashEntry(this, chessboard, beta, 0, TranspositionTable.HASH_FLAG_BETA, move);
                     return beta;
                 }
             }
@@ -185,6 +201,9 @@ public class Search implements Runnable {
         if (in_check && legal_moves == 0) {
             return -MATE_VALUE + ply;
         }
+
+        int qs_hash_flag = (alpha > alpha_orig) ? TranspositionTable.HASH_FLAG_EXACT : TranspositionTable.HASH_FLAG_ALPHA;
+        TranspositionTable.writeHashEntry(this, chessboard, alpha, 0, qs_hash_flag, tt_best_move);
 
         return alpha;
     }
@@ -283,6 +302,14 @@ public class Search implements Runnable {
             depth++;
         }
 
+        // Internal Iterative Reduction (IIR):
+        // TT에 이 노드에 대한 hash_move가 전혀 없다는 건 이 노드가 잘 탐색된 적이
+        // 없다는 뜻이므로, depth를 한 칸 줄여서 먼저 대략적인 무브 오더링을 얻는다.
+        // (in_check 노드는 이미 확장을 받았으므로 제외)
+        if (depth >= 4 && hash_move == 0 && !in_check) {
+            depth--;
+        }
+
         int legal_moves = 0;
 
         boolean has_non_pawn_material;
@@ -360,6 +387,22 @@ public class Search implements Runnable {
 
         for (int count = 0; count < move_count; count++) {
             int move = ScoreMove.pickNextMove(this, count, move_count, move_list);
+
+            boolean is_capture = EncodeMove.getMoveCapture(move);
+            boolean is_promotion = EncodeMove.getMovePromoted(move) != 0;
+            boolean is_killer_lmp = (move == killer_moves[0][ply] || move == killer_moves[1][ply]);
+
+            // Late Move Pruning (Move Count Pruning):
+            // 얕은 depth에서, 이미 충분히 많은 수를 본 뒤 나오는 "조용한" 후순위 수는
+            // 아예 탐색하지 않고 건너뛴다. (LMR보다 한 단계 더 공격적인 프루닝)
+            if (!pv_node && !in_check && depth <= 8
+                    && !is_capture && !is_promotion && !is_killer_lmp
+                    && Math.abs(alpha) < MATE_SCORE) {
+                int lmp_threshold = 3 + depth * depth;
+                if (moves_searched >= lmp_threshold) {
+                    continue;
+                }
+            }
 
             ply++;
             MoveGenerator.makeStandardMove(chessboard, move);
@@ -563,6 +606,7 @@ public class Search implements Runnable {
         int beta = INFINITY;
 
         int last_best_move = 0;
+        int fail_count = 0;
 
         for (int current_depth = 1; current_depth <= maxDepth; current_depth++) {
             if (TimeControlVariables.stopped) break;
@@ -575,15 +619,20 @@ public class Search implements Runnable {
             }
 
             if (score <= alpha || score >= beta) {
+                fail_count++;
+                // 실패할 때마다 창을 지수적으로 넓힌다 (VAL_WINDOW * 2, 4, 8, 16, 32...)
+                int expand = VAL_WINDOW * (1 << Math.min(fail_count, 5));
+
                 if (score <= alpha) {
-                    alpha = alpha - (VAL_WINDOW * 4);
+                    alpha = Math.max(-INFINITY, alpha - expand);
                 } else {
-                    beta = beta + (VAL_WINDOW * 4);
+                    beta = Math.min(INFINITY, beta + expand);
                 }
                 current_depth--;
                 continue;
             }
 
+            fail_count = 0;
             alpha = score - VAL_WINDOW;
             beta = score + VAL_WINDOW;
 

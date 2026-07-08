@@ -61,11 +61,11 @@ public class ScoreMove {
         }
     }
 
-    // Quiescence Search용 (여기서는 Hash Move를 신경 쓸 필요 없으므로 0 전달)
-    public static void scoreQuiescenceMoves(Search search, Chessboard chessboard, int[] move_list, int move_count) {
+    // Quiescence Search용 (이제 TT에서 읽어온 hash_move를 넘겨받아 정렬에 반영)
+    public static void scoreQuiescenceMoves(Search search, Chessboard chessboard, int[] move_list, int move_count, int hash_move) {
         for (int count = 0; count < move_count; count++){
             if (EncodeMove.getMoveCapture(move_list[count])) {
-                search.move_scores[count] = scoreMove(search, chessboard, move_list[count], 0);
+                search.move_scores[count] = scoreMove(search, chessboard, move_list[count], hash_move);
             } else {
                 search.move_scores[count] = -1000000; // 조용한 수는 QS에서 제외
             }
