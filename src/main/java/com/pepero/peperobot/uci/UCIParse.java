@@ -270,6 +270,6 @@ public class UCIParse {
         }
 
         // search position
-        Search.searchPosition(chessboard ,depth);
+        Search.searchPosition(chessboard, depth);
     }
 }

@@ -10,10 +10,7 @@ import static com.pepero.jcb.constant.SideToMove.white;
 
 public class ScoreMove {
 
-    // [수정됨] hash_move 파라미터 추가
     public static int scoreMove(Search search, Chessboard chessboard, int move, int hash_move){
-
-        // [핵심] 해시 무브(이전 탐색 Best Move)라면 무조건 1순위 배정
         if (move == hash_move && hash_move != 0) {
             return 2000000;
         }
@@ -25,28 +22,32 @@ public class ScoreMove {
             }
         }
 
-        if (EncodeMove.getMoveCapture(move)){
-            int target_piece = P;
-            int start_piece, end_piece;
+        int promoted_piece = EncodeMove.getMovePromoted(move);
+        int promotion_bonus = 0;
 
-            if(chessboard.side == white) {
-                start_piece = p;
-                end_piece = k;
-            } else {
-                start_piece = P;
-                end_piece = K;
-            }
+        if (promoted_piece == Q || promoted_piece == q) {
+            promotion_bonus = 15000;
+        } else if (promoted_piece != 0) {
+            promotion_bonus = 10000;
+        }
+
+        if (EncodeMove.getMoveCapture(move)){
+            int target_piece;
+            int start_piece = (chessboard.side == white) ? p : P;
 
             long targetMask = 1L << EncodeMove.getMoveTarget(move);
-            for(int bb_piece = start_piece; bb_piece <= end_piece; bb_piece++){
-                if((chessboard.bitboards[bb_piece] & targetMask) != 0L){
-                    target_piece = bb_piece;
-                    break;
-                }
-            }
+            target_piece = start_piece;
 
-            return MvvLva.MVV_LVA[EncodeMove.getMovePiece(move)][target_piece] + 10000;
+            if ((chessboard.bitboards[start_piece + 1] & targetMask) != 0L) { target_piece = start_piece + 1; } // Knight
+            else if ((chessboard.bitboards[start_piece + 2] & targetMask) != 0L) { target_piece = start_piece + 2; } // Bishop
+            else if ((chessboard.bitboards[start_piece + 3] & targetMask) != 0L) { target_piece = start_piece + 3; } // Rook
+            else if ((chessboard.bitboards[start_piece + 4] & targetMask) != 0L) { target_piece = start_piece + 4; } // Queen
+
+            return MvvLva.MVV_LVA[EncodeMove.getMovePiece(move)][target_piece] + 10000 + promotion_bonus;
+
         } else {
+            if (promotion_bonus > 0) return promotion_bonus;
+
             if(search.killer_moves[0][search.ply] == move) return 9000;
             else if(search.killer_moves[1][search.ply] == move) return 8000;
             else return search.history_moves[EncodeMove.getMovePiece(move)][EncodeMove.getMoveTarget(move)];

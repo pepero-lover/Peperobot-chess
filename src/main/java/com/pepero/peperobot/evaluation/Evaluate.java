@@ -4,6 +4,7 @@ import com.pepero.jcb.bitboard.Attacks;
 import com.pepero.jcb.bitboard.BitBoardUtils;
 import com.pepero.jcb.core.Chessboard;
 
+import static com.pepero.jcb.constant.BoardSquares.*;
 import static com.pepero.jcb.constant.EncodedPieces.*;
 import static com.pepero.jcb.constant.SideToMove.*;
 
@@ -29,18 +30,51 @@ public class Evaluate {
     // Material score [game phase][piece]
     private static final int[][] material_score = {
             // opening material score
-            { 87, 337, 365, 477, 1025, 12000, -82, -337, -365, -477, -1025, -12000 },
+            { 87, 337, 365, 477, 1025, 12000, -87, -337, -365, -477, -1025, -12000 },
             // endgame material score
-            { 100, 281, 297, 512,  936, 12000, -94, -281, -297, -512,  -936, -12000 }
+            { 100, 281, 297, 512,  936, 12000, -100, -281, -297, -512,  -936, -12000 }
     };
 
     private static int bishop_unit = 4;
     private static int queen_unit = 9;
 
-    private static int bishop_mobility_opening = 5;
-    private static int bishop_mobility_endgame = 5;
+    // 비숍 페어 보너스 (엔드게임에서 두 비숍의 가치가 더 커지는 게 정설이라 endgame 값을 더 크게)
+    private static final int bishop_pair_bonus_opening = 30;
+    private static final int bishop_pair_bonus_endgame = 50;
+
+    private static int bishop_mobility_opening = 2;
+    private static int bishop_mobility_endgame = 3;
     private static int queen_mobility_opening = 1;
     private static int queen_mobility_endgame = 2;
+
+    private static int knight_unit = 4; // 튜닝 필요, 기본 나이트 이동 가능 칸 수 기준점
+    private static int knight_mobility_opening = 4;
+    private static int knight_mobility_endgame = 2;
+
+    // 기존 space_unit(3)이 너무 작아서 d4+e4 같은 센터 폰 듀오의 가치가
+    // 거의 반영되지 않던 문제를 고쳤다. 이제 space_unit은 "랭크당" 가중치로 쓰인다.
+    private static int space_unit = 6;
+
+    // ---- 추가: 개발 지연 페널티 ----
+    // 나이트/비숍이 시작 칸에 그대로 있으면 오프닝 단계에서 페널티를 준다.
+    // 주의: 이미 knight/bishop mobility 공식이 "막혀 있는 기물"에 페널티를 주고 있으므로
+    // (예: 자기 폰에 막힌 비숍은 mobility만으로 이미 -8점) 여기 값을 너무 크게 잡으면
+    // 같은 문제를 이중으로 벌점 처리하게 된다. 14 -> 6으로 낮춤: 물질 우위 + 중앙 장악처럼
+    // "개발을 늦춰도 될 만한 이유가 있는" 상황에서 개발 지연 페널티가 다른 이득을
+    // 과도하게 상쇄해버리는 것을 방지.
+    private static final int UNDEVELOPED_MINOR_PENALTY = 6;
+
+    // ---- 추가: 센터 폰 듀오 보너스 ----
+    // d+e 파일 폰을 나란히 전진시켜 큰 센터를 만드는 것 자체의 전략적 가치
+    // (상대 마이너피스 진입 차단, e5/d5 돌파 위협 등)를 명시적으로 반영.
+    private static final int CENTER_PAWN_DUO_BONUS = 24;
+
+    // ---- 추가: 센터 폰 완전 소실 페널티 ----
+    // d/e 파일에 폰이 하나도 없으면, 그 파일 전체가 상대 나이트/비숍/룩이
+    // 아무 저항 없이 드나들 수 있는 영구적인 구멍이 된다. 단순히 "폰 1개 손해"라는
+    // 물질 차이만으로는 이 구조적 약점(예: 상대 나이트가 e5/d5에 절대 쫓겨나지
+    // 않는 아웃포스트를 얻는 것)이 전혀 반영되지 않아서 별도 텀으로 추가.
+    private static final int CENTRAL_FILE_HOLE_PENALTY = 18;
 
     // Positional piece scores [game phase][piece][square] (PeSTO)
     private static final int[][][] positional_score = {
@@ -194,10 +228,14 @@ public class Evaluate {
     private static final int double_pawn_penalty_endgame = -10;
     private static final int isolated_pawn_penalty_opening = -5;
     private static final int isolated_pawn_penalty_endgame = -10;
-    private static final int[] passed_pawn_bonus = { 0, 10, 30, 50, 75, 100, 150, 200 };
+
+    private static final int[] passed_pawn_bonus_opening = { 0, 5, 8, 12, 20, 30,  50,  70 };
+    private static final int[] passed_pawn_bonus_endgame = { 0, 10, 30, 50, 75, 100, 150, 200 };
 
     private static final int semi_open_file_score = 10;
     private static final int open_file_score = 15;
+
+    private static final long CENTRAL_FILES_MASK = file_masks[c1] | file_masks[d1] | file_masks[e1] | file_masks[f1];
 
     // Safety Table 추가
     private static final int[] SAFETY_TABLE = {
@@ -277,12 +315,30 @@ public class Evaluate {
         return white_piece_scores + black_piece_scores;
     }
 
-    // 킹 안전도 평가 (King Safety)
-    private static int evaluateKingSafety(Chessboard chessboard, int king_square, int side) {
+    private static int getTotalMaterial(Chessboard chessboard, boolean isWhite) {
+        if (isWhite) {
+            return Long.bitCount(chessboard.bitboards[P]) * 100
+                    + Long.bitCount(chessboard.bitboards[N]) * 320
+                    + Long.bitCount(chessboard.bitboards[B]) * 330
+                    + Long.bitCount(chessboard.bitboards[R]) * 500
+                    + Long.bitCount(chessboard.bitboards[Q]) * 900;
+        } else {
+            return Long.bitCount(chessboard.bitboards[p]) * 100
+                    + Long.bitCount(chessboard.bitboards[n]) * 320
+                    + Long.bitCount(chessboard.bitboards[b]) * 330
+                    + Long.bitCount(chessboard.bitboards[r]) * 500
+                    + Long.bitCount(chessboard.bitboards[q]) * 900;
+        }
+    }
+
+    public static int getKingSafetyPenalty(Chessboard chessboard, int side) {
+        int king_square = BitBoardUtils.getLS1BIndex(chessboard.bitboards[side == white ? K : k]);
+        return evaluateKingSafety(chessboard, king_square, side);
+    }
+
+    public static int evaluateKingSafety(Chessboard chessboard, int king_square, int side) {
         int penalty = 0;
         long king_file = file_masks[king_square];
-        long adj_files = isolated_masks[king_square];
-        long danger_zone = king_file | adj_files;
         int king_file_idx = king_square % 8;
 
         long own_pawns = chessboard.bitboards[(side == white) ? P : p];
@@ -293,64 +349,246 @@ public class Evaluate {
         long enemy_bishops = chessboard.bitboards[(side == white) ? b : B];
 
         boolean is_center = (king_file_idx == 3 || king_file_idx == 4);
-        int pawn_shield_count = Long.bitCount(own_pawns & danger_zone);
+
+        // ---- 수정: 폰 방패는 "파일"이 아니라 "킹과의 실제 거리(랭크)"로 평가 ----
+        // 기존 코드는 danger_zone(파일 전체, 랭크 무관)에 폰이 있기만 하면 shield로 인정해서,
+        // g2 폰이 g4로 전진해도 여전히 같은 파일이라 shield_count가 그대로였음 (버그).
+        // 그 결과 g2g4처럼 킹 앞 폰을 미는 수의 약화 효과가 전혀 반영되지 않았음.
+        // 이제 킹 바로 앞 1랭크(가중치 2)와 2랭크 앞(가중치 1)으로 나눠서 평가한다.
+        int king_rank_idx = king_square / 8; // 0=rank8 ... 7=rank1
+        int rank_step = (side == white) ? -1 : 1;
+
+        long immediate_shield_zone = 0L; // 킹 바로 앞 1랭크
+        long extended_shield_zone  = 0L; // 킹 앞 2랭크
+
+        for (int df = -1; df <= 1; df++) {
+            int f = king_file_idx + df;
+            if (f < 0 || f > 7) continue;
+
+            int r1 = king_rank_idx + rank_step;
+            if (r1 >= 0 && r1 <= 7) immediate_shield_zone |= (1L << (r1 * 8 + f));
+
+            int r2 = king_rank_idx + rank_step * 2;
+            if (r2 >= 0 && r2 <= 7) extended_shield_zone |= (1L << (r2 * 8 + f));
+        }
+
+        int immediate_pawns = Long.bitCount(own_pawns & immediate_shield_zone);
+        int extended_pawns  = Long.bitCount(own_pawns & extended_shield_zone);
+
+        // 만점 6점 (파일 3개 모두 킹 바로 앞 1랭크에 폰이 있을 때). 전진한 폰은 절반 가치만 인정.
+        int shield_score = immediate_pawns * 2 + extended_pawns;
 
         if (!is_center) {
-            if (pawn_shield_count < 2) penalty += 100;
-            else if (pawn_shield_count < 3) penalty += 30;
+            if (shield_score < 3) penalty += 140;       // 방패가 거의 없거나 대부분 전진해버림
+            else if (shield_score < 5) penalty += 40;   // 방패 폰 일부가 전진해서 약화됨
         }
+
+        long enemy_heavy_pieces = enemy_queen | enemy_rooks;
+        boolean is_file_attacked = (enemy_heavy_pieces & king_file) != 0;
+
         if ((own_pawns & king_file) == 0) {
-            penalty += is_center ? 30 : 60;
-            if ((enemy_pawns & king_file) == 0) penalty += is_center ? 40 : 100;
+            int file_penalty = is_center ? 30 : 60;
+            if ((enemy_pawns & king_file) == 0) {
+                file_penalty += is_center ? 40 : 100;
+            }
+            if (enemy_heavy_pieces == 0) {
+                file_penalty = 0;
+            } else if (!is_file_attacked) {
+                file_penalty /= 2;
+            }
+            penalty += file_penalty;
         }
+
+        // ================== 수정된 부분: 실제 공격 비트보드 기반 위협 탐지 ==================
+        // 기존 코드는 "적 기물이 킹과 같은/인접 파일에 있고 N랭크 이내에 있는가"라는
+        // 근접성(위치) 휴리스틱으로 위협을 판단했다. 이 방식은 비숍의 대각선 공격을
+        // 전혀 반영하지 못한다 (예: b2 피앙케토 비숍이 g7/h8 대각선으로 킹을 직접
+        // 겨누고 있어도, b2는 킹의 파일과 멀리 떨어져 있어 위협으로 잡히지 않았음).
+        //
+        // 이제는 각 기물이 "실제로 공격하는 칸"(Attacks.get*Attacks, 블로커 포함)을
+        // 계산해서 그 결과가 킹 바로 주변 구역(king_zone)과 겹치는지로 판단한다.
+        // 이렇게 하면 자신은 킹에서 멀리 있어도 사선/직선으로 킹(또는 그 앞 방패 폰)을
+        // 직접 노리는 기물을 정확히 잡아내고, 반대로 근처에 있어도 실제로는
+        // 공격선이 다른 방향인 기물은 위협으로 잡지 않는다.
+        int king_rank = king_square / 8;
+        long both_occ = chessboard.occupancies[both];
+
+        // 킹 바로 옆 8칸 + 킹 자신의 칸. 이 구역에 실제로 닿는 공격만 "진짜 위협"으로 센다.
+        long king_zone = Attacks.king_attacks[king_square] | (1L << king_square);
 
         int attack_weight = 0;
         int attackers_count = 0;
+        int q_count = 0;
 
-        if ((enemy_knights & danger_zone) != 0) {
-            attackers_count++;
-            attack_weight += 2;
-        }
-        if ((enemy_bishops & danger_zone) != 0) {
-            attackers_count++;
-            attack_weight += 2;
-        }
-        if ((enemy_rooks & danger_zone) != 0) {
-            attackers_count++;
-            attack_weight += 3;
-        }
-        if (enemy_queen != 0 && (enemy_queen & danger_zone) != 0) {
-            attackers_count++;
-            attack_weight += 5;
+        long knights_bb = enemy_knights;
+        while (knights_bb != 0) {
+            int sq = BitBoardUtils.getLS1BIndex(knights_bb);
+            if ((Attacks.knight_attacks[sq] & king_zone) != 0) {
+                attackers_count++;
+                attack_weight += 15;
+            }
+            knights_bb = BitBoardUtils.popBit(knights_bb, sq);
         }
 
-        if (attackers_count >= 2 || (enemy_queen != 0 && (enemy_queen & danger_zone) != 0)) {
-            if (pawn_shield_count == 0) {
-                attack_weight *= 2;
-            } else if (pawn_shield_count == 1) {
+        long bishops_bb = enemy_bishops;
+        while (bishops_bb != 0) {
+            int sq = BitBoardUtils.getLS1BIndex(bishops_bb);
+            if ((Attacks.getBishopAttacks(sq, both_occ) & king_zone) != 0) {
+                attackers_count++;
+                attack_weight += 15;
+            }
+            bishops_bb = BitBoardUtils.popBit(bishops_bb, sq);
+        }
+
+        long rooks_bb = enemy_rooks;
+        while (rooks_bb != 0) {
+            int sq = BitBoardUtils.getLS1BIndex(rooks_bb);
+            if ((Attacks.getRookAttacks(sq, both_occ) & king_zone) != 0) {
+                attackers_count++;
+                attack_weight += 25;
+            }
+            rooks_bb = BitBoardUtils.popBit(rooks_bb, sq);
+        }
+
+        long queens_bb = enemy_queen;
+        while (queens_bb != 0) {
+            int sq = BitBoardUtils.getLS1BIndex(queens_bb);
+            if ((Attacks.getQueenAttacks(sq, both_occ) & king_zone) != 0) {
+                attackers_count++;
+                q_count++;
+                attack_weight += 40;
+            }
+            queens_bb = BitBoardUtils.popBit(queens_bb, sq);
+        }
+
+        // 공격자 가중치 계산 (기존과 동일)
+        if (attackers_count >= 2 || q_count > 0) {
+            if (shield_score == 0) {
                 attack_weight = (attack_weight * 3) / 2;
+            } else if (shield_score <= 2) {
+                attack_weight = (attack_weight * 5) / 4;
             }
 
-            int king_rank = king_square / 8;
-
-            // 🔥 A8 = 0 구조에 맞게 거리 계산 수정 (White 킹은 Rank 7에 존재)
             int rank_distance = (side == white) ? (7 - king_rank) : king_rank;
-
-            if (rank_distance >= 2) {
-                attack_weight += (rank_distance * 3);
+            if (rank_distance >= 1) {
+                attack_weight += (rank_distance * 25);
             }
 
             attack_weight = Math.min(attack_weight, 99);
             int current_penalty = SAFETY_TABLE[attack_weight];
 
-            if (enemy_queen == 0) {
+            if (q_count == 0) {
                 current_penalty = Math.min(current_penalty / 2, 150);
             }
 
             penalty += current_penalty;
         }
+        // =========================================================================
 
-        return penalty;
+        return penalty >> 2;
+    }
+
+    private static int evaluateSpace(Chessboard chessboard) {
+        // 기존 코드는 c~f 파일, 2~4랭크 안에 폰이 "있기만" 하면 폰 1개당 고정 3점을 줬다.
+        // 그 결과 d4+e4처럼 랭크4까지 전진한 강한 센터 듀오나, 랭크2에 그냥 머물러 있는
+        // 폰이나 똑같은 점수를 받아서 큰 센터를 만드는 것의 가치가 거의 사라졌음.
+        // 이제 "얼마나 전진했는가(rank)"에 비례해서 점수를 준다.
+        long center_files = file_masks[c1] | file_masks[d1] | file_masks[e1] | file_masks[f1];
+
+        int white_space = 0;
+        long white_center_pawns = chessboard.bitboards[P] & center_files;
+        while (white_center_pawns != 0) {
+            int sq = BitBoardUtils.getLS1BIndex(white_center_pawns);
+            int ranks_advanced = 6 - (sq / 8); // rank2=0, rank3=1, rank4=2, rank5=3 ...
+            if (ranks_advanced > 0) white_space += ranks_advanced;
+            white_center_pawns = BitBoardUtils.popBit(white_center_pawns, sq);
+        }
+
+        int black_space = 0;
+        long black_center_pawns = chessboard.bitboards[p] & center_files;
+        while (black_center_pawns != 0) {
+            int sq = BitBoardUtils.getLS1BIndex(black_center_pawns);
+            int ranks_advanced = (sq / 8) - 1; // rank7=0, rank6=1, rank5=2, rank4=3 ...
+            if (ranks_advanced > 0) black_space += ranks_advanced;
+            black_center_pawns = BitBoardUtils.popBit(black_center_pawns, sq);
+        }
+
+        return (white_space - black_space) * space_unit;
+    }
+
+    // ---- 추가: 개발 지연 페널티 + 센터 폰 듀오 보너스 ----
+    // 오프닝 스코어(score_opening)에만 더해지며, 게임 페이즈가 미들/엔드로 갈수록
+    // 기존의 phase blending 로직에 의해 자연히 비중이 줄어든다.
+    // ---- 추가: 물질 우위 여부를 판단하기 위한 간단한 non-pawn material 계산 ----
+    // 나이트를 잡으면서 자기 센터 폰들을 내주는 식의 "정당한 대가로 생긴 구멍"과
+    // 그냥 방치해서 생긴 구멍을 구분하기 위해 사용한다.
+    private static int getNonPawnMaterial(Chessboard chessboard, boolean white) {
+        if (white) {
+            return Long.bitCount(chessboard.bitboards[N]) * 320
+                    + Long.bitCount(chessboard.bitboards[B]) * 330
+                    + Long.bitCount(chessboard.bitboards[R]) * 500
+                    + Long.bitCount(chessboard.bitboards[Q]) * 900;
+        } else {
+            return Long.bitCount(chessboard.bitboards[n]) * 320
+                    + Long.bitCount(chessboard.bitboards[b]) * 330
+                    + Long.bitCount(chessboard.bitboards[r]) * 500
+                    + Long.bitCount(chessboard.bitboards[q]) * 900;
+        }
+    }
+
+    private static int evaluateDevelopmentAndCenter(Chessboard chessboard) {
+        int score = 0;
+
+        // White 시작 칸: Nb1=57, Ng1=62, Bc1=58, Bf1=61
+        long white_home_minors = (1L << 57) | (1L << 62) | (1L << 58) | (1L << 61);
+        long white_still_home = (chessboard.bitboards[N] | chessboard.bitboards[B]) & white_home_minors;
+        score -= Long.bitCount(white_still_home) * UNDEVELOPED_MINOR_PENALTY;
+
+        // Black 시작 칸: Nb8=1, Ng8=6, Bc8=2, Bf8=5
+        long black_home_minors = (1L << 1) | (1L << 6) | (1L << 2) | (1L << 5);
+        long black_still_home = (chessboard.bitboards[n] | chessboard.bitboards[b]) & black_home_minors;
+        score += Long.bitCount(black_still_home) * UNDEVELOPED_MINOR_PENALTY;
+
+        // 센터 폰 듀오: d+e 파일 폰이 둘 다 4랭크 이상 전진해서 나란히 있으면 보너스
+        long white_d_file = chessboard.bitboards[P] & file_masks[d1];
+        long white_e_file = chessboard.bitboards[P] & file_masks[e1];
+        boolean white_duo = white_d_file != 0 && white_e_file != 0
+                && (BitBoardUtils.getLS1BIndex(white_d_file) / 8) <= 4
+                && (BitBoardUtils.getLS1BIndex(white_e_file) / 8) <= 4;
+        if (white_duo) score += CENTER_PAWN_DUO_BONUS;
+
+        // 주의: 흑은 a8=0 방향이 아니라 h1=63 방향으로 전진하므로,
+        // "가장 전진한 폰"을 찾으려면 LS1B가 아니라 MSB(가장 큰 square 번호)를 써야 한다.
+        long black_d_file = chessboard.bitboards[p] & file_masks[d1];
+        long black_e_file = chessboard.bitboards[p] & file_masks[e1];
+        boolean black_duo = black_d_file != 0 && black_e_file != 0
+                && ((63 - Long.numberOfLeadingZeros(black_d_file)) / 8) >= 3
+                && ((63 - Long.numberOfLeadingZeros(black_e_file)) / 8) >= 3;
+        if (black_duo) score -= CENTER_PAWN_DUO_BONUS;
+
+        // 센터 파일(d, e)에 폰이 완전히 없으면 페널티. 양쪽 다 없으면 서로 상쇄된다.
+        // 단, 그 쪽이 이미 non-pawn material에서 앞서 있다면(=나이트/비숍 등을 따내면서
+        // 생긴 구멍일 가능성이 높다면) 페널티를 1/3로 줄인다. 그렇지 않으면 "나이트 하나를
+        // 이득 봤는데 그 대가로 생긴 구멍" 때문에 그 이득 자체가 거의 상쇄돼버리는
+        // 이중 페널티 문제가 생긴다.
+        int white_non_pawn_material = getNonPawnMaterial(chessboard, true);
+        int black_non_pawn_material = getNonPawnMaterial(chessboard, false);
+
+        boolean white_no_d_pawn = (chessboard.bitboards[P] & file_masks[d1]) == 0;
+        boolean white_no_e_pawn = (chessboard.bitboards[P] & file_masks[e1]) == 0;
+        int white_hole_penalty = (white_non_pawn_material >= black_non_pawn_material)
+                ? CENTRAL_FILE_HOLE_PENALTY / 3 : CENTRAL_FILE_HOLE_PENALTY;
+        if (white_no_d_pawn) score -= white_hole_penalty;
+        if (white_no_e_pawn) score -= white_hole_penalty;
+
+        boolean black_no_d_pawn = (chessboard.bitboards[p] & file_masks[d1]) == 0;
+        boolean black_no_e_pawn = (chessboard.bitboards[p] & file_masks[e1]) == 0;
+        int black_hole_penalty = (black_non_pawn_material >= white_non_pawn_material)
+                ? CENTRAL_FILE_HOLE_PENALTY / 3 : CENTRAL_FILE_HOLE_PENALTY;
+        if (black_no_d_pawn) score += black_hole_penalty;
+        if (black_no_e_pawn) score += black_hole_penalty;
+
+        return score;
     }
 
     public static int evaluate(Chessboard chessboard) {
@@ -397,14 +635,18 @@ public class Evaluate {
 
                         if ((white_passed_masks[square] & chessboard.bitboards[p]) == 0) {
                             int rank = 7 - (square / 8);
-                            score_opening += passed_pawn_bonus[rank];
-                            score_endgame += passed_pawn_bonus[rank];
+                            score_opening += passed_pawn_bonus_opening[rank];
+                            score_endgame += passed_pawn_bonus_endgame[rank];
                         }
                         break;
 
                     case N:
                         score_opening += positional_score[OPENING][KNIGHT][square];
                         score_endgame += positional_score[ENDGAME][KNIGHT][square];
+
+                        long knight_attacks = Attacks.knight_attacks[square] & ~chessboard.occupancies[white];
+                        score_opening += (Long.bitCount(knight_attacks) - knight_unit) * knight_mobility_opening;
+                        score_endgame += (Long.bitCount(knight_attacks) - knight_unit) * knight_mobility_endgame;
                         break;
 
                     case B:
@@ -414,20 +656,18 @@ public class Evaluate {
                         long bishop_attacks = Attacks.getBishopAttacks(square, both_occupancies);
                         score_opening += (Long.bitCount(bishop_attacks) - bishop_unit) * bishop_mobility_opening;
                         score_endgame += (Long.bitCount(bishop_attacks) - bishop_unit) * bishop_mobility_endgame;
+                        if (square == 43 && (chessboard.bitboards[P] & (1L << 51)) != 0) {
+                            score_opening -= 45; score_endgame -= 30;
+                        }
+                        if (square == 44 && (chessboard.bitboards[P] & (1L << 52)) != 0) {
+                            score_opening -= 45; score_endgame -= 30;
+                        }
                         break;
 
                     case R:
                         score_opening += positional_score[OPENING][ROOK][square];
                         score_endgame += positional_score[ENDGAME][ROOK][square];
 
-                        if ((chessboard.bitboards[P] & file_masks[square]) == 0) {
-                            score_opening += semi_open_file_score;
-                            score_endgame += semi_open_file_score;
-                        }
-                        if (((chessboard.bitboards[P] | chessboard.bitboards[p]) & file_masks[square]) == 0) {
-                            score_opening += open_file_score;
-                            score_endgame += open_file_score;
-                        }
                         break;
 
                     case Q:
@@ -443,16 +683,6 @@ public class Evaluate {
                         score_opening += positional_score[OPENING][KING][square];
                         score_endgame += positional_score[ENDGAME][KING][square];
 
-                        if ((chessboard.bitboards[P] & file_masks[square]) == 0) {
-                            score_opening -= semi_open_file_score;
-                            score_endgame -= semi_open_file_score;
-                        }
-                        if (((chessboard.bitboards[P] | chessboard.bitboards[p]) & file_masks[square]) == 0) {
-                            score_opening -= open_file_score;
-                            score_endgame -= open_file_score;
-                        }
-
-                        // 🔥 백(White) 킹 안전도 패널티 적용
                         score_opening -= evaluateKingSafety(chessboard, square, white);
                         break;
 
@@ -475,14 +705,18 @@ public class Evaluate {
 
                         if ((black_passed_masks[square] & chessboard.bitboards[P]) == 0) {
                             int rank = square / 8;
-                            score_opening -= passed_pawn_bonus[rank];
-                            score_endgame -= passed_pawn_bonus[rank];
+                            score_opening -= passed_pawn_bonus_opening[rank];
+                            score_endgame -= passed_pawn_bonus_endgame[rank];
                         }
                         break;
 
                     case n:
                         score_opening -= positional_score[OPENING][KNIGHT][square ^ 56];
                         score_endgame -= positional_score[ENDGAME][KNIGHT][square ^ 56];
+
+                        long b_knight_attacks = Attacks.knight_attacks[square] & ~chessboard.occupancies[black];
+                        score_opening -= (Long.bitCount(b_knight_attacks) - knight_unit) * knight_mobility_opening;
+                        score_endgame -= (Long.bitCount(b_knight_attacks) - knight_unit) * knight_mobility_endgame;
                         break;
 
                     case b:
@@ -492,6 +726,12 @@ public class Evaluate {
                         long b_bishop_attacks = Attacks.getBishopAttacks(square, both_occupancies);
                         score_opening -= (Long.bitCount(b_bishop_attacks) - bishop_unit) * bishop_mobility_opening;
                         score_endgame -= (Long.bitCount(b_bishop_attacks) - bishop_unit) * bishop_mobility_endgame;
+                        if (square == 19 && (chessboard.bitboards[p] & (1L << 11)) != 0) {
+                            score_opening += 45; score_endgame += 30;
+                        }
+                        if (square == 20 && (chessboard.bitboards[p] & (1L << 12)) != 0) {
+                            score_opening += 45; score_endgame += 30;
+                        }
                         break;
 
                     case r:
@@ -538,15 +778,37 @@ public class Evaluate {
             }
         }
 
+        // ---- 추가: 비숍 페어 보너스 ----
+        // 지금까지 코드엔 "비숍 2개 보유" 자체에 대한 보너스가 전혀 없었음.
+        // 예: Nxf2 Rxf2 Bxf2+ Kxf2 같은 교환 후 한쪽만 비숍을 잃으면
+        // 순수 물질 차이(나이트+비숍 vs 룩+폰) 외에, 비숍 페어를 유지한 쪽의
+        // 장기적 활동성/우세가 전혀 반영되지 않고 있었음.
+        if (Long.bitCount(chessboard.bitboards[B]) >= 2) {
+            score_opening += bishop_pair_bonus_opening;
+            score_endgame += bishop_pair_bonus_endgame;
+        }
+        if (Long.bitCount(chessboard.bitboards[b]) >= 2) {
+            score_opening -= bishop_pair_bonus_opening;
+            score_endgame -= bishop_pair_bonus_endgame;
+        }
+
+        int structural_bonus = evaluateSpace(chessboard) + evaluateDevelopmentAndCenter(chessboard);
+        int material_diff = getTotalMaterial(chessboard, true) - getTotalMaterial(chessboard, false);
+
+        if (material_diff > 0 && structural_bonus < 0) {
+            structural_bonus /= 2;
+        } else if (material_diff < 0 && structural_bonus > 0) {
+            structural_bonus /= 2;
+        }
+
+        score_opening += structural_bonus;
+
         if (game_phase == MIDDLEGAME) {
             score = (score_opening * game_phase_score + score_endgame * (OPENING_PHASE_SCORE - game_phase_score)) / OPENING_PHASE_SCORE;
         } else if (game_phase == OPENING) {
             score = score_opening;
         } else if (game_phase == ENDGAME) {
             score = score_endgame;
-        }
-
-        if (game_phase == ENDGAME) {
         }
 
         return (chessboard.side == white) ? score : -score;

@@ -2,6 +2,7 @@ package com.pepero.peperobot;
 
 import com.pepero.peperobot.evaluation.Evaluate;
 import com.pepero.peperobot.evaluation.ScoreMove;
+import com.pepero.peperobot.evaluation.SEE;
 import com.pepero.peperobot.hash.TranspositionTable;
 import com.pepero.peperobot.uci.UCIManager;
 import com.pepero.peperobot.uci.time_control.TimeControlVariables;
@@ -30,13 +31,13 @@ public class Search implements Runnable {
     private static Search[] workers;
 
     public static final int MAX_PLY = 256;
-    public static final int VAL_WINDOW = 50;
+    public static final int VAL_WINDOW = 150;
 
     public static final int INFINITY   = 50000;
     public static final int MATE_VALUE = 49000;
     public static final int MATE_SCORE = 48000;
 
-    public static final int FULL_DEPTH_MOVES = 4;
+    public static final int FULL_DEPTH_MOVES = 3;
     public static final int REDUCTION_LIMIT = 3;
 
     private final int threadId;
@@ -54,6 +55,9 @@ public class Search implements Runnable {
     public int[] move_scores = new int[256];
 
     public static final int[] FUTILITY_MARGIN = { 0, 200, 300, 500 };
+
+    // QS delta pruning 여유값 (졸 하나 정도의 안전 마진, 필요시 튜닝)
+    private static final int DELTA_MARGIN = 200;
 
     public int best_move = 0;
 
@@ -107,32 +111,64 @@ public class Search implements Runnable {
             return Evaluate.evaluate(chessboard);
         }
 
+        boolean in_check = MoveGenerator.isSquareAttacked(chessboard,
+                chessboard.side == white ?
+                        BitBoardUtils.getLS1BIndex(chessboard.bitboards[K]):
+                        BitBoardUtils.getLS1BIndex(chessboard.bitboards[k]),
+                chessboard.side ^ 1);
+
         int evaluation = Evaluate.evaluate(chessboard);
 
-        if (evaluation >= beta) {
-            return beta;
-        }
-
-        if (evaluation > alpha) {
-            alpha = evaluation;
+        if (!in_check) {
+            if (evaluation >= beta) {
+                return beta;
+            }
+            if (evaluation > alpha) {
+                alpha = evaluation;
+            }
         }
 
         int[] move_list = MoveCache.SEARCH_MOVE_CACHE.get()[chessboard.ply];
         int move_count = MoveGenerator.generateMoves(chessboard, move_list);
 
-        ScoreMove.scoreQuiescenceMoves(this, chessboard, move_list, move_count);
+        if (in_check) {
+            ScoreMove.scoreMoves(this, chessboard, move_list, move_count, 0);
+        } else {
+            ScoreMove.scoreQuiescenceMoves(this, chessboard, move_list, move_count);
+        }
+
+        int legal_moves = 0;
 
         for (int count = 0; count < move_count; count++) {
             int move = ScoreMove.pickNextMove(this, count, move_count, move_list);
 
-            if (!EncodeMove.getMoveCapture(move)) {
-                break;
+            if (!in_check && !EncodeMove.getMoveCapture(move)) {
+                continue;
+            }
+
+            if (!in_check) {
+                // 프로모션이나 메이트 스코어 근처에서는 물질 계산이 왜곡되므로 pruning 제외
+                boolean near_mate = Math.abs(alpha) >= MATE_SCORE - MAX_PLY;
+                boolean is_promotion = EncodeMove.getMovePromoted(move) != 0;
+
+                if (!is_promotion && !near_mate) {
+                    int captured_value = SEE.capturedValue(chessboard, move);
+                    if (evaluation + captured_value + DELTA_MARGIN < alpha) {
+                        continue;
+                    }
+
+                    if (SEE.see(chessboard, move) < 0) {
+                        continue;
+                    }
+                }
             }
 
             ply++;
             MoveGenerator.makeStandardMove(chessboard, move);
+            legal_moves++;
 
             int score = -quiescence(chessboard, -beta, -alpha);
+
             ply--;
             MoveGenerator.unmakeStandardMove(chessboard, move);
 
@@ -145,6 +181,11 @@ public class Search implements Runnable {
                 }
             }
         }
+
+        if (in_check && legal_moves == 0) {
+            return -MATE_VALUE + ply;
+        }
+
         return alpha;
     }
 
@@ -152,7 +193,9 @@ public class Search implements Runnable {
         int score;
         int hash_flag = TranspositionTable.HASH_FLAG_ALPHA;
 
-        if(ply != 0 && ChessboardUtils.getRepetitionCount(chessboard) > 2){
+        pv_length[ply] = ply;
+
+        if(ply != 0 && ChessboardUtils.getRepetitionCount(chessboard) > 1){
             return 0;
         }
 
@@ -160,7 +203,9 @@ public class Search implements Runnable {
 
         int tt_score = TranspositionTable.readHashEntry(this, chessboard, alpha, beta, depth);
         if(ply != 0 && tt_score != TranspositionTable.NO_HASH_ENTRY && !pv_node) {
-            return tt_score;
+            if (ChessboardUtils.getRepetitionCount(chessboard) == 0) {
+                return tt_score;
+            }
         }
 
         int hash_move = TranspositionTable.readHashMove(chessboard);
@@ -174,48 +219,49 @@ public class Search implements Runnable {
 
         pv_length[ply] = ply;
 
-        if (ply > 0 && tablebase != null) {
-            long whiteBB = chessboard.bitboards[P] | chessboard.bitboards[N] | chessboard.bitboards[B] |
-                    chessboard.bitboards[R] | chessboard.bitboards[Q] | chessboard.bitboards[K];
-            long blackBB = chessboard.bitboards[p] | chessboard.bitboards[n] | chessboard.bitboards[b] |
-                    chessboard.bitboards[r] | chessboard.bitboards[q] | chessboard.bitboards[k];
+        if (ply > 0 && tablebase != null && Long.bitCount(chessboard.occupancies[both]) <= tablebase.tb_largest()) {
+            SyzygyPosition pos = new SyzygyPosition();
 
-            if (Long.bitCount(whiteBB | blackBB) <= tablebase.tb_largest()) {
-                SyzygyPosition pos = new SyzygyPosition();
+            pos.setWhite(Long.reverseBytes(chessboard.occupancies[white]));
+            pos.setBlack(Long.reverseBytes(chessboard.occupancies[black]));
+            pos.setKings(Long.reverseBytes(chessboard.bitboards[K] | chessboard.bitboards[k]));
+            pos.setQueens(Long.reverseBytes(chessboard.bitboards[Q] | chessboard.bitboards[q]));
+            pos.setRooks(Long.reverseBytes(chessboard.bitboards[R] | chessboard.bitboards[r]));
+            pos.setBishops(Long.reverseBytes(chessboard.bitboards[B] | chessboard.bitboards[b]));
+            pos.setKnights(Long.reverseBytes(chessboard.bitboards[N] | chessboard.bitboards[n]));
+            pos.setPawns(Long.reverseBytes(chessboard.bitboards[P] | chessboard.bitboards[p]));
 
-                pos.setWhite(Long.reverseBytes(whiteBB));
-                pos.setBlack(Long.reverseBytes(blackBB));
-                pos.setKings(Long.reverseBytes(chessboard.bitboards[K] | chessboard.bitboards[k]));
-                pos.setQueens(Long.reverseBytes(chessboard.bitboards[Q] | chessboard.bitboards[q]));
-                pos.setRooks(Long.reverseBytes(chessboard.bitboards[R] | chessboard.bitboards[r]));
-                pos.setBishops(Long.reverseBytes(chessboard.bitboards[B] | chessboard.bitboards[b]));
-                pos.setKnights(Long.reverseBytes(chessboard.bitboards[N] | chessboard.bitboards[n]));
-                pos.setPawns(Long.reverseBytes(chessboard.bitboards[P] | chessboard.bitboards[p]));
+            pos.setRule50((byte) chessboard.half_ply);
+            pos.setCastling((byte) 0);
 
-                pos.setRule50((byte) 0);
-                pos.setCastling((byte) 0);
+            int flippedEp = (chessboard.enpassant == no_sq) ? 0 : (chessboard.enpassant ^ 56);
+            pos.setEp((byte) flippedEp);
+            pos.setTurn(chessboard.side == white);
 
-                byte epSquare = 0;
-                if (chessboard.enpassant != no_sq) {
-                    epSquare = (byte) (chessboard.enpassant ^ 56);
-                }
+            int[] results = new int[Syzygy.TB_MAX_MOVES];
+            int rootRes = tablebase.tb_probe_root(pos, results);
 
-                pos.setEp(epSquare);
+            if (rootRes != Syzygy.TB_RESULT_FAILED) {
+                int tbFrom = Syzygy.TB_GET_FROM(rootRes) ^ 56;
+                int tbTo = Syzygy.TB_GET_TO(rootRes) ^ 56;
+                int tbPromo = Syzygy.TB_GET_PROMOTES(rootRes);
 
-                int flippedEp = (chessboard.enpassant == no_sq) ? 0 : (chessboard.enpassant ^ 56);
-                pos.setEp((byte) flippedEp);
+                int[] root_moves = MoveCache.SEARCH_MOVE_CACHE.get()[chessboard.ply];
+                int move_count = MoveGenerator.generateMoves(chessboard, root_moves);
 
-                pos.setTurn(chessboard.side == white);
+                for (int count = 0; count < move_count; count++) {
+                    int move = root_moves[count];
 
-                int wdl = tablebase.tb_probe_wdl(pos);
+                    int moveFrom = EncodeMove.getMoveSource(move);
+                    int moveTo = EncodeMove.getMoveTarget(move);
+                    int movePromotion = EncodeMove.getMovePromoted(move);
 
-                if (wdl != Syzygy.TB_RESULT_FAILED) {
-                    if (wdl == Syzygy.TB_WIN) {
-                        return MATE_SCORE - ply;
-                    } else if (wdl == Syzygy.TB_LOSS) {
-                        return -MATE_SCORE + ply;
-                    } else if (wdl == Syzygy.TB_DRAW || wdl == Syzygy.TB_CURSED_WIN || wdl == Syzygy.TB_BLESSED_LOSS) {
-                        return 0;
+                    if (moveFrom == tbFrom && moveTo == tbTo && (movePromotion == 0 || tbPromo == movePromotion)) {
+                        int wdl = Syzygy.TB_GET_WDL(rootRes);
+                        int dtz = Syzygy.TB_GET_DTZ(rootRes);
+
+                        return (wdl == Syzygy.TB_WIN ? MATE_VALUE - dtz :
+                                (wdl == Syzygy.TB_LOSS ? -MATE_VALUE + dtz : 0));
                     }
                 }
             }
@@ -233,11 +279,12 @@ public class Search implements Runnable {
                         BitBoardUtils.getLS1BIndex(chessboard.bitboards[k]),
                 chessboard.side ^ 1);
 
-        if(in_check) depth++;
+        if (in_check && ply < maxDepth + 5) {
+            depth++;
+        }
 
         int legal_moves = 0;
 
-        // [개선 포인트 2] NMP 츠크츠방 방어 로직 추가
         boolean has_non_pawn_material;
         if (chessboard.side == white) {
             has_non_pawn_material = (chessboard.bitboards[N] | chessboard.bitboards[B] |
@@ -247,7 +294,18 @@ public class Search implements Runnable {
                     chessboard.bitboards[r] | chessboard.bitboards[q]) != 0;
         }
 
-        if (depth >= 3 && !in_check && ply != 0 && has_non_pawn_material){
+        int static_eval = Evaluate.evaluate(chessboard);
+
+        int king_danger = Evaluate.getKingSafetyPenalty(chessboard, chessboard.side);
+
+        if (depth <= 5 && !in_check && !pv_node && Math.abs(beta) < MATE_SCORE) {
+            int rfp_margin = 120 * depth;
+            if (static_eval - rfp_margin >= beta) {
+                return static_eval;
+            }
+        }
+
+        if (depth >= 3 && !in_check && ply != 0 && has_non_pawn_material && king_danger <= 50){
             int saved_enpassant = chessboard.enpassant;
             long saved_hash_key = chessboard.hash_key;
             int saved_half_ply = chessboard.half_ply;
@@ -279,6 +337,14 @@ public class Search implements Runnable {
             }
         }
 
+        if (depth <= 3 && !in_check && !pv_node && Math.abs(alpha) < MATE_SCORE) {
+            if (king_danger <= 40) {
+                if (static_eval + FUTILITY_MARGIN[depth] <= alpha) {
+                    return quiescence(chessboard, alpha, beta);
+                }
+            }
+        }
+
         int[] move_list = MoveCache.SEARCH_MOVE_CACHE.get()[chessboard.ply];
         int move_count = MoveGenerator.generateMoves(chessboard, move_list);
 
@@ -300,6 +366,12 @@ public class Search implements Runnable {
 
             legal_moves++;
 
+            boolean gives_check = MoveGenerator.isSquareAttacked(chessboard,
+                    chessboard.side == white ?
+                            BitBoardUtils.getLS1BIndex(chessboard.bitboards[K]) :
+                            BitBoardUtils.getLS1BIndex(chessboard.bitboards[k]),
+                    chessboard.side ^ 1);
+
             if (moves_searched == 0) {
                 score = -negamax(chessboard, -beta, -alpha, depth - 1);
             } else {
@@ -308,6 +380,8 @@ public class Search implements Runnable {
                 boolean do_lmr = (moves_searched >= FULL_DEPTH_MOVES &&
                         depth >= REDUCTION_LIMIT &&
                         !in_check &&
+                        king_danger <= 40 &&
+                        !gives_check &&
                         !EncodeMove.getMoveCapture(move) &&
                         EncodeMove.getMovePromoted(move) == 0 &&
                         !is_killer);
@@ -316,6 +390,11 @@ public class Search implements Runnable {
                     int d = Math.min(depth, 63);
                     int m = Math.min(moves_searched, 63);
                     int reduction = reduction_table[d][m];
+
+                    if (!pv_node) {
+                        reduction++;
+                    }
+
                     if (reduction < 1) reduction = 1;
 
                     int lmr_depth = Math.max(0, depth - 1 - reduction);
@@ -409,6 +488,77 @@ public class Search implements Runnable {
         for (int[] pvTable : pv_table) Arrays.fill(pvTable, 0);
         Arrays.fill(pv_length, 0);
 
+        if (tablebase != null) {
+            long whiteBB = chessboard.bitboards[P] | chessboard.bitboards[N] | chessboard.bitboards[B] |
+                    chessboard.bitboards[R] | chessboard.bitboards[Q] | chessboard.bitboards[K];
+            long blackBB = chessboard.bitboards[p] | chessboard.bitboards[n] | chessboard.bitboards[b] |
+                    chessboard.bitboards[r] | chessboard.bitboards[q] | chessboard.bitboards[k];
+
+            if (Long.bitCount(whiteBB | blackBB) <= tablebase.tb_largest()) {
+                SyzygyPosition pos = new SyzygyPosition();
+
+                pos.setWhite(Long.reverseBytes(whiteBB));
+                pos.setBlack(Long.reverseBytes(blackBB));
+                pos.setKings(Long.reverseBytes(chessboard.bitboards[K] | chessboard.bitboards[k]));
+                pos.setQueens(Long.reverseBytes(chessboard.bitboards[Q] | chessboard.bitboards[q]));
+                pos.setRooks(Long.reverseBytes(chessboard.bitboards[R] | chessboard.bitboards[r]));
+                pos.setBishops(Long.reverseBytes(chessboard.bitboards[B] | chessboard.bitboards[b]));
+                pos.setKnights(Long.reverseBytes(chessboard.bitboards[N] | chessboard.bitboards[n]));
+                pos.setPawns(Long.reverseBytes(chessboard.bitboards[P] | chessboard.bitboards[p]));
+
+                pos.setRule50((byte) chessboard.half_ply);
+                pos.setCastling((byte) 0);
+
+                int flippedEp = (chessboard.enpassant == no_sq) ? 0 : (chessboard.enpassant ^ 56);
+                pos.setEp((byte) flippedEp);
+                pos.setTurn(chessboard.side == white);
+
+                int[] results = new int[Syzygy.TB_MAX_MOVES];
+                int rootRes = tablebase.tb_probe_root(pos, results);
+
+                if (rootRes != Syzygy.TB_RESULT_FAILED) {
+                    int tbFrom = Syzygy.TB_GET_FROM(rootRes) ^ 56;
+                    int tbTo = Syzygy.TB_GET_TO(rootRes) ^ 56;
+                    int tbPromo = Syzygy.TB_GET_PROMOTES(rootRes);
+
+                    int[] root_moves = MoveCache.SEARCH_MOVE_CACHE.get()[chessboard.ply];
+                    int move_count = MoveGenerator.generateMoves(chessboard, root_moves);
+
+                    for (int count = 0; count < move_count; count++) {
+                        int move = root_moves[count];
+
+                        int moveFrom = EncodeMove.getMoveSource(move);
+                        int moveTo = EncodeMove.getMoveTarget(move);
+                        int movePromotion = EncodeMove.getMovePromoted(move);
+
+                        if (moveFrom == tbFrom && moveTo == tbTo && (movePromotion == 0 || tbPromo == movePromotion)) {
+                            best_move = move;
+
+                            if (threadId == 0) {
+                                int wdl = Syzygy.TB_GET_WDL(rootRes);
+                                int dtz = Syzygy.TB_GET_DTZ(rootRes);
+
+                                if(wdl == Syzygy.TB_WIN) {
+                                    System.out.println("info depth 0 score mate " + (dtz / 2 + 1) +
+                                            " pv " + EncodeMove.moveToString(move,
+                                            chessboard.gameVariants == GameVariants.CHESS960));
+                                } else if(wdl == Syzygy.TB_LOSS) {
+                                    System.out.println("info depth 0 score mate " + ((-dtz) / 2 - 1) +
+                                            " pv " + EncodeMove.moveToString(move,
+                                            chessboard.gameVariants == GameVariants.CHESS960));
+                                } else {
+                                    System.out.println("info depth 0 score score 0 pv " + EncodeMove.moveToString(move,
+                                            chessboard.gameVariants == GameVariants.CHESS960));
+                                }
+                            }
+
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
         int alpha = -INFINITY;
         int beta = INFINITY;
 
@@ -425,8 +575,11 @@ public class Search implements Runnable {
             }
 
             if (score <= alpha || score >= beta) {
-                alpha = -INFINITY;
-                beta = INFINITY;
+                if (score <= alpha) {
+                    alpha = alpha - (VAL_WINDOW * 4);
+                } else {
+                    beta = beta + (VAL_WINDOW * 4);
+                }
                 current_depth--;
                 continue;
             }
