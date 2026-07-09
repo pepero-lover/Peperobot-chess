@@ -65,6 +65,8 @@ public class Search implements Runnable {
 
     public static Syzygy tablebase;
 
+    private int root_ply;
+
     static {
         for (int depth = 1; depth < 64; depth++) {
             for (int move_count = 1; move_count < 64; move_count++) {
@@ -212,7 +214,7 @@ public class Search implements Runnable {
 
         pv_length[ply] = ply;
 
-        if(ply != 0 && ChessboardUtils.getRepetitionCount(chessboard) > 1){
+        if(ply != 0 && ChessboardUtils.isRepetitionDraw(chessboard, root_ply)){
             return 0;
         }
 
@@ -599,6 +601,8 @@ public class Search implements Runnable {
                 }
             }
         }
+
+        root_ply = chessboard.ply;
 
         int alpha = -INFINITY;
         int beta = INFINITY;
