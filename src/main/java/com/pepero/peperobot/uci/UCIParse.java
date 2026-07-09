@@ -1,6 +1,7 @@
 package com.pepero.peperobot.uci;
 
 import com.pepero.peperobot.Search;
+import com.pepero.peperobot.hash.TranspositionTable;
 import com.pepero.peperobot.uci.time_control.TimeControlVariables;
 import com.pepero.jcb.constant.MoveCache;
 import com.pepero.jcb.constant.SideToMove;
@@ -228,11 +229,14 @@ public class UCIParse {
         // start timer
         TimeControlVariables.starttime = TimeUtils.getTimeMs();
 
+        // move overhead: safety margin reserved for GUI / network latency
+        int overhead = TimeControlVariables.moveOverhead;
+
         // when the remaining time is given
         if (TimeControlVariables.movetime != -1) {
             TimeControlVariables.timeset = true;
 
-            long mTime = TimeControlVariables.movetime - 50;
+            long mTime = TimeControlVariables.movetime - overhead;
             mTime = Math.max(mTime, 50);
 
             TimeControlVariables.optTime = mTime;
@@ -249,11 +253,18 @@ public class UCIParse {
 
             if (movestogo == 0) movestogo = 30;
 
-            long optTime = (time / Math.max(movestogo, 30)) + (inc * 3 / 4);
+            // NOTE: previously this floored movestogo at 30, which meant that
+            // whenever the GUI reported FEWER than 30 moves left (e.g. approaching
+            // a classical time control), the engine still divided as if 30 moves
+            // remained and under-allocated time exactly when it should have spent
+            // more per move. Only floor at 1 to avoid divide-by-zero / negative time.
+            int effectiveMovesToGo = Math.max(movestogo, 1);
+
+            long optTime = (time / effectiveMovesToGo) + (inc * 3 / 4);
             long maxTime = Math.min(time / 5, optTime * 5);
 
-            optTime -= 50;
-            maxTime -= 50;
+            optTime -= overhead;
+            maxTime -= overhead;
 
             optTime = Math.max(optTime, 50);
             maxTime = Math.max(maxTime, 50);
@@ -271,5 +282,55 @@ public class UCIParse {
 
         // search position
         Search.searchPosition(chessboard, depth);
+    }
+
+    /**
+     * Parse option command
+     *
+     * @param name option name
+     * @param value option value
+     */
+    public static void parseOption(String name, String value) {
+        String optionName = name.toLowerCase();
+
+        switch (optionName) {
+            // thread count
+            case "threads":
+                try {
+                    Search.MAX_THREADS = Integer.parseInt(value);
+                } catch (NumberFormatException ignored) {}
+                break;
+
+            // hash table size
+            case "hash":
+                try {
+                    // set hash size
+                    int hashSize = Integer.parseInt(value);
+                    TranspositionTable.resizeTT(hashSize);
+                } catch (NumberFormatException ignored) {}
+                break;
+
+            // clear hash table (TT)
+            case "clear hash":
+                TranspositionTable.clearTT();
+                break;
+
+            // syzygy table base
+            case "syzygypath":
+                if (value != null && !value.isEmpty() && !value.equals("<empty>")) {
+                    Search.initSyzygy(value);
+                }
+                break;
+
+            // move overhead (ms reserved for GUI/network latency)
+            case "move overhead":
+                try {
+                    TimeControlVariables.moveOverhead = Integer.parseInt(value);
+                } catch (NumberFormatException ignored) {}
+                break;
+
+            default:
+                break;
+        }
     }
 }

@@ -31,4 +31,8 @@ public class TimeControlVariables {
 
     // variable to flag time control availability
     public static boolean timeset = false;
+
+    // UCI "Move Overhead" option: safety margin (ms) reserved for GUI/network
+    // communication latency so the engine doesn't lose on time in practice.
+    public static int moveOverhead = 50;
 }

@@ -111,7 +111,6 @@ public class Search implements Runnable {
             return Evaluate.evaluate(chessboard);
         }
 
-        // --- TT probe (depth 0 = quiescence 전용 슬롯으로 취급) ---
         int alpha_orig = alpha;
 
         int tt_score = TranspositionTable.readHashEntry(this, chessboard, alpha, beta, 0);
@@ -120,7 +119,6 @@ public class Search implements Runnable {
         }
 
         int hash_move = TranspositionTable.readHashMove(chessboard);
-        // --- TT probe 끝 ---
 
         boolean in_check = MoveGenerator.isSquareAttacked(chessboard,
                 chessboard.side == white ?
@@ -306,7 +304,7 @@ public class Search implements Runnable {
         // TT에 이 노드에 대한 hash_move가 전혀 없다는 건 이 노드가 잘 탐색된 적이
         // 없다는 뜻이므로, depth를 한 칸 줄여서 먼저 대략적인 무브 오더링을 얻는다.
         // (in_check 노드는 이미 확장을 받았으므로 제외)
-        if (depth >= 4 && hash_move == 0 && !in_check) {
+        if (depth >= 4 && hash_move == 0 && !in_check && TranspositionTable.TT_SIZE != 0) {
             depth--;
         }
 
