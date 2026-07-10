@@ -39,8 +39,8 @@ public class Evaluate {
     private static int queen_unit = 9;
 
     // 비숍 페어 보너스 (엔드게임에서 두 비숍의 가치가 더 커지는 게 정설이라 endgame 값을 더 크게)
-    private static final int bishop_pair_bonus_opening = 30;
-    private static final int bishop_pair_bonus_endgame = 50;
+    public static int bishop_pair_bonus_opening = 30;
+    public static int bishop_pair_bonus_endgame = 50;
 
     private static int bishop_mobility_opening = 2;
     private static int bishop_mobility_endgame = 3;
@@ -62,19 +62,19 @@ public class Evaluate {
     // 같은 문제를 이중으로 벌점 처리하게 된다. 14 -> 6으로 낮춤: 물질 우위 + 중앙 장악처럼
     // "개발을 늦춰도 될 만한 이유가 있는" 상황에서 개발 지연 페널티가 다른 이득을
     // 과도하게 상쇄해버리는 것을 방지.
-    private static final int UNDEVELOPED_MINOR_PENALTY = 6;
+    public static int UNDEVELOPED_MINOR_PENALTY = 6;
 
     // ---- 추가: 센터 폰 듀오 보너스 ----
     // d+e 파일 폰을 나란히 전진시켜 큰 센터를 만드는 것 자체의 전략적 가치
     // (상대 마이너피스 진입 차단, e5/d5 돌파 위협 등)를 명시적으로 반영.
-    private static final int CENTER_PAWN_DUO_BONUS = 24;
+    public static int CENTER_PAWN_DUO_BONUS = 24;
 
     // ---- 추가: 센터 폰 완전 소실 페널티 ----
     // d/e 파일에 폰이 하나도 없으면, 그 파일 전체가 상대 나이트/비숍/룩이
     // 아무 저항 없이 드나들 수 있는 영구적인 구멍이 된다. 단순히 "폰 1개 손해"라는
     // 물질 차이만으로는 이 구조적 약점(예: 상대 나이트가 e5/d5에 절대 쫓겨나지
     // 않는 아웃포스트를 얻는 것)이 전혀 반영되지 않아서 별도 텀으로 추가.
-    private static final int CENTRAL_FILE_HOLE_PENALTY = 18;
+    public static int CENTRAL_FILE_HOLE_PENALTY = 18;
 
     // Positional piece scores [game phase][piece][square] (PeSTO)
     private static final int[][][] positional_score = {

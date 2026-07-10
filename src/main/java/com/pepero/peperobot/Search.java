@@ -61,6 +61,8 @@ public class Search implements Runnable {
 
     public int best_move = 0;
 
+    public static long nodeLimit = -1;
+
     private static final int[][] reduction_table = new int[64][64];
 
     public static Syzygy tablebase;
@@ -108,6 +110,9 @@ public class Search implements Runnable {
         }
 
         nodes++;
+        if (nodeLimit > 0 && MAX_THREADS == 1 && nodes >= nodeLimit) {
+            TimeControlVariables.stopped = true;
+        }
 
         if (ply >= MAX_PLY) {
             return Evaluate.evaluate(chessboard);
@@ -231,6 +236,9 @@ public class Search implements Runnable {
 
         if (threadId == 0 && (nodes & 2047) == 0) {
             UCIManager.communicate();
+            if (nodeLimit > 0 && getTotalNodes() >= nodeLimit) {
+                TimeControlVariables.stopped = true;
+            }
         }
 
         if (ply >= MAX_PLY)
@@ -291,6 +299,10 @@ public class Search implements Runnable {
         }
 
         nodes++;
+
+        if (nodeLimit > 0 && getTotalNodes() >= nodeLimit) {
+            TimeControlVariables.stopped = true;
+        }
 
         boolean in_check = MoveGenerator.isSquareAttacked(chessboard,
                 chessboard.side == white ?

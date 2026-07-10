@@ -1,6 +1,7 @@
 package com.pepero.peperobot.uci;
 
 import com.pepero.peperobot.Search;
+import com.pepero.peperobot.evaluation.Evaluate;
 import com.pepero.peperobot.hash.TranspositionTable;
 import com.pepero.peperobot.uci.time_control.TimeControlVariables;
 import com.pepero.jcb.constant.MoveCache;
@@ -203,11 +204,15 @@ public class UCIParse {
         TimeControlVariables.timeset = false;
         TimeControlVariables.stopped = false;
 
+        Search.nodeLimit = -1;
+
         String[] tokens = command.split(" ");
         for (int i = 0; i < tokens.length; i++) {
             try {
                 if (tokens[i].equals("depth")) {
                     depth = Integer.parseInt(tokens[i + 1]);
+                } else if (tokens[i].equals("nodes")) {
+                    Search.nodeLimit = Long.parseLong(tokens[i + 1]);
                 } else if (tokens[i].equals("wtime") && chessboard.side == SideToMove.white) {
                     TimeControlVariables.time = Integer.parseInt(tokens[i + 1]);
                 } else if (tokens[i].equals("btime") && chessboard.side == SideToMove.black) {
@@ -327,6 +332,22 @@ public class UCIParse {
                 try {
                     TimeControlVariables.moveOverhead = Integer.parseInt(value);
                 } catch (NumberFormatException ignored) {}
+                break;
+
+            case "centerpawnbonus":
+                Evaluate.CENTER_PAWN_DUO_BONUS = Integer.parseInt(value);
+                break;
+            case "undevelopedminorpenalty":
+                Evaluate.UNDEVELOPED_MINOR_PENALTY = Integer.parseInt(value);
+                break;
+            case "centralfileholepenalty":
+                Evaluate.CENTRAL_FILE_HOLE_PENALTY = Integer.parseInt(value);
+                break;
+            case "bishoppairbonusopening":
+                Evaluate.bishop_pair_bonus_opening = Integer.parseInt(value);
+                break;
+            case "bishoppairbonusendgame":
+                Evaluate.bishop_pair_bonus_endgame = Integer.parseInt(value);
                 break;
 
             default:

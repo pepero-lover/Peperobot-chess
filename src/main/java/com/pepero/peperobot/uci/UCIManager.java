@@ -1,6 +1,7 @@
 package com.pepero.peperobot.uci;
 
 import com.pepero.peperobot.Search;
+import com.pepero.peperobot.evaluation.Evaluate;
 import com.pepero.peperobot.hash.TranspositionTable;
 import com.pepero.peperobot.uci.time_control.TimeControlVariables;
 import com.pepero.jcb.core.Chessboard;
@@ -141,6 +142,15 @@ public class UCIManager {
                 System.out.println("option name Clear Hash type button");
                 System.out.println("option name SyzygyPath type string default <empty>");
                 System.out.println("option name Move Overhead type spin default 50 min 0 max 5000");
+
+                // evaluation tuning options (used by SPSA / tune.py)
+                // NOTE: these MUST be declared here or cutechess-cli / other UCI GUIs
+                // will not forward "setoption" for them at all.
+                System.out.println("option name CenterPawnBonus type spin default " + Evaluate.CENTER_PAWN_DUO_BONUS + " min -200 max 200");
+                System.out.println("option name UndevelopedMinorPenalty type spin default " + Evaluate.UNDEVELOPED_MINOR_PENALTY + " min -200 max 200");
+                System.out.println("option name CentralFileHolePenalty type spin default " + Evaluate.CENTRAL_FILE_HOLE_PENALTY + " min -200 max 200");
+                System.out.println("option name BishopPairBonusOpening type spin default " + Evaluate.bishop_pair_bonus_opening + " min -200 max 200");
+                System.out.println("option name BishopPairBonusEndgame type spin default " + Evaluate.bishop_pair_bonus_endgame + " min -200 max 200");
 
                 System.out.println("uciok");
             }
