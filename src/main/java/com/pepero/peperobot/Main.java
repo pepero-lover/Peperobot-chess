@@ -1,5 +1,7 @@
 package com.pepero.peperobot;
 
+import com.pepero.jcb.api.parse.FENValidator;
+import com.pepero.jcb.core.Chessboard;
 import com.pepero.peperobot.uci.UCIManager;
 import com.pepero.jcb.core.ChessboardUtils;
 import com.pepero.jcb.core.Initializer;
