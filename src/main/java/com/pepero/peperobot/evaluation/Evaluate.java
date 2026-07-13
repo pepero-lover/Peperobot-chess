@@ -627,6 +627,14 @@ public class Evaluate {
                     case R:
                         score_opening += positional_score[OPENING][ROOK][square];
                         score_endgame += positional_score[ENDGAME][ROOK][square];
+                        if ((chessboard.bitboards[P] & file_masks[square]) == 0) {
+                            score_opening += semi_open_file_score;
+                            score_endgame += semi_open_file_score;
+                        }
+                        if (((chessboard.bitboards[P] | chessboard.bitboards[p]) & file_masks[square]) == 0) {
+                            score_opening += open_file_score;
+                            score_endgame += open_file_score;
+                        }
                         break;
 
                     case Q:

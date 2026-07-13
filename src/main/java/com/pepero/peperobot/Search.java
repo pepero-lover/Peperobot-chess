@@ -48,6 +48,15 @@ public class Search implements Runnable {
     public long nodes = 0;
     public int[][] killer_moves = new int[2][MAX_PLY];
     public int[][] history_moves = new int[12][64];
+
+    // history gravity/malus 적용을 위해, 이 노드(ply)에서 "실제로 탐색된" quiet move들을 기록해둔다.
+    // (LMP로 건너뛴 수는 실제 평가를 받은 게 아니므로 포함하지 않는다)
+    private static final int MAX_QUIET_TRACKED = 64;
+    private final int[][] quiet_moves_at_ply = new int[MAX_PLY][MAX_QUIET_TRACKED];
+    private final int[] quiet_count_at_ply = new int[MAX_PLY];
+
+    // history 값이 무한정 커지지 않도록 gravity(감쇠) 방식으로 클램프하는 상한
+    private static final int MAX_HISTORY = 16384;
     public boolean follow_pv;
     public boolean score_pv;
     public int[] pv_length = new int[MAX_PLY];
@@ -211,6 +220,40 @@ public class Search implements Runnable {
         TranspositionTable.writeHashEntry(this, chessboard, alpha, 0, qs_hash_flag, tt_best_move);
 
         return alpha;
+    }
+
+    // depth가 깊을수록(=더 신뢰할 수 있는 정보일수록) 더 큰 bonus/malus를 준다.
+    // 상한(1200)을 둬서 depth가 커져도 한 번에 history가 과도하게 흔들리지 않게 한다.
+    private static int historyBonus(int depth) {
+        return Math.min(1200, 16 * depth * depth);
+    }
+
+    // Gravity(감쇠) 방식 history 업데이트.
+    // 새 bonus/malus를 그냥 더하는 대신, 현재 값이 클수록 실제 반영되는 양을 줄여서
+    // (current - current*|bonus|/MAX_HISTORY) 값이 ±MAX_HISTORY 근처로 자연히 수렴하게 한다.
+    // 이렇게 하면 오래된 기록이 무한정 쌓여 최근 정보를 압도하는 문제를 막을 수 있다.
+    private void updateQuietHistory(int move, int bonus) {
+        int piece = EncodeMove.getMovePiece(move);
+        int to = EncodeMove.getMoveTarget(move);
+
+        int clamped_bonus = Math.max(-MAX_HISTORY, Math.min(MAX_HISTORY, bonus));
+        int current = history_moves[piece][to];
+
+        history_moves[piece][to] = current + clamped_bonus - current * Math.abs(clamped_bonus) / MAX_HISTORY;
+    }
+
+    // 이 노드에서 cutoff/best move를 제외하고 "탐색은 했지만 더 나은 수에 밀린" quiet move들에게
+    // malus를 주고, 최종 승자에게는 bonus를 준다. (History gravity + malus)
+    private void applyQuietHistoryUpdate(int ply_index, int best_quiet_move, int bonus) {
+        updateQuietHistory(best_quiet_move, bonus);
+
+        int qcount = quiet_count_at_ply[ply_index];
+        for (int i = 0; i < qcount; i++) {
+            int qm = quiet_moves_at_ply[ply_index][i];
+            if (qm != best_quiet_move) {
+                updateQuietHistory(qm, -bonus);
+            }
+        }
     }
 
     private int negamax(Chessboard chessboard, int alpha, int beta, int depth) {
@@ -397,6 +440,8 @@ public class Search implements Runnable {
 
         int tt_best_move = 0;
 
+        quiet_count_at_ply[ply] = 0;
+
         for (int count = 0; count < move_count; count++) {
             int move = ScoreMove.pickNextMove(this, count, move_count, move_list);
 
@@ -414,6 +459,11 @@ public class Search implements Runnable {
                 if (moves_searched >= lmp_threshold) {
                     continue;
                 }
+            }
+
+            // 실제로 탐색되는(=LMP로 건너뛰지 않은) quiet move만 gravity/malus 대상으로 기록한다.
+            if (!is_capture && quiet_count_at_ply[ply] < MAX_QUIET_TRACKED) {
+                quiet_moves_at_ply[ply][quiet_count_at_ply[ply]++] = move;
             }
 
             ply++;
@@ -478,12 +528,6 @@ public class Search implements Runnable {
                 tt_best_move = move;
                 hash_flag = TranspositionTable.HASH_FLAG_EXACT;
 
-                if(!EncodeMove.getMoveCapture(move)) {
-                    history_moves
-                            [EncodeMove.getMovePiece(move)]
-                            [EncodeMove.getMoveTarget(move)] += depth;
-                }
-
                 alpha = score;
                 pv_table[ply][ply] = move;
 
@@ -497,6 +541,10 @@ public class Search implements Runnable {
                     TranspositionTable.writeHashEntry(this, chessboard, beta, depth, TranspositionTable.HASH_FLAG_BETA, move);
 
                     if(!EncodeMove.getMoveCapture(move)){
+                        // fail-high를 낸 quiet move에는 bonus를, 이 노드에서 그보다 먼저
+                        // 시도했다가 cutoff를 못 낸 다른 quiet move들에는 malus를 준다.
+                        applyQuietHistoryUpdate(ply, move, historyBonus(depth));
+
                         killer_moves[1][ply] = killer_moves[0][ply];
                         killer_moves[0][ply] = move;
                     }
@@ -512,6 +560,14 @@ public class Search implements Runnable {
             else {
                 return 0;
             }
+        }
+
+        // cutoff 없이 노드가 끝난 경우(EXACT), 최종 best move가 quiet라면
+        // fail-high 때보다 절반 크기의 bonus/malus로 history를 갱신한다.
+        // (cutoff만큼 강한 신호는 아니지만, 이 노드에서 결국 가장 좋았던 수라는 정보는 유효하다)
+        if (hash_flag == TranspositionTable.HASH_FLAG_EXACT && tt_best_move != 0
+                && !EncodeMove.getMoveCapture(tt_best_move)) {
+            applyQuietHistoryUpdate(ply, tt_best_move, historyBonus(depth) / 2);
         }
 
         TranspositionTable.writeHashEntry(this, chessboard, alpha, depth, hash_flag, tt_best_move);
