@@ -1,5 +1,6 @@
 package com.pepero.peperobot.uci;
 
+import com.pepero.jcb.core.ChessboardUtils;
 import com.pepero.peperobot.Search;
 import com.pepero.peperobot.evaluation.Evaluate;
 import com.pepero.peperobot.hash.TranspositionTable;
@@ -119,6 +120,11 @@ public class UCIManager {
                 }
 
                 UCIParse.parseOption(name, value);
+            }
+
+            // show chess board position
+            else if(input.equals("d")) {
+                ChessboardUtils.printChessBoard(chessboardUCI);
             }
 
             // parse UCI "quit" command
