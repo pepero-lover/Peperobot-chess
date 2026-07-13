@@ -50,7 +50,13 @@ public class ScoreMove {
 
             if(search.killer_moves[0][search.ply] == move) return 9000;
             else if(search.killer_moves[1][search.ply] == move) return 8000;
-            else return search.history_moves[EncodeMove.getMovePiece(move)][EncodeMove.getMoveTarget(move)];
+            else {
+                int piece = EncodeMove.getMovePiece(move);
+                int to = EncodeMove.getMoveTarget(move);
+                // 기존 history_moves(내 수 기준)에 continuation history
+                // (상대 직전 수 + 내 직전 수 문맥)를 더해 quiet move 순서를 정한다.
+                return search.history_moves[piece][to] + search.getContHistScore(piece, to);
+            }
         }
     }
 

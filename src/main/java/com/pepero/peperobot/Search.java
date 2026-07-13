@@ -57,6 +57,25 @@ public class Search implements Runnable {
 
     // history 값이 무한정 커지지 않도록 gravity(감쇠) 방식으로 클램프하는 상한
     private static final int MAX_HISTORY = 16384;
+
+    // ---- Continuation History (counter-move history / follow-up history) ----
+    // "직전에 어떤 수가 있었는지"를 고려한 history. history_moves는 (내 수)만 보지만,
+    // 이건 (상대/나의 직전 수) + (지금 후보 수) 조합으로 quiet move의 좋고 나쁨을 추적한다.
+    //   cont_hist_1[context][move] : 1-ply back (직전에 "상대"가 둔 수) 기준 - counter-move history
+    //   cont_hist_2[context][move] : 2-ply back (직전에 "내가" 둔 수) 기준   - follow-up history
+    // context/move 인덱스는 piece*64+to 로 압축(0~767). NULL_MOVE_INDEX는 NMP처럼
+    // 실제 기물 이동이 아닌 경우를 위한 별도 버킷(엉뚱한 실제 수와 충돌하지 않게 분리).
+    private static final int NULL_MOVE_INDEX = 768;
+    private final int[][] cont_hist_1 = new int[NULL_MOVE_INDEX + 1][768];
+    private final int[][] cont_hist_2 = new int[NULL_MOVE_INDEX + 1][768];
+
+    // 각 ply에 "도달하게 만든 수"의 (piece,to) 압축 인덱스를 기록해둔다.
+    // played_index_at_ply[ply] = 부모 노드에서 이 ply로 넘어오게 한 수의 인덱스.
+    private final int[] played_index_at_ply = new int[MAX_PLY + 1];
+
+    private static int moveIndex(int piece, int to) {
+        return piece * 64 + to;
+    }
     public boolean follow_pv;
     public boolean score_pv;
     public int[] pv_length = new int[MAX_PLY];
@@ -246,14 +265,57 @@ public class Search implements Runnable {
     // malus를 주고, 최종 승자에게는 bonus를 준다. (History gravity + malus)
     private void applyQuietHistoryUpdate(int ply_index, int best_quiet_move, int bonus) {
         updateQuietHistory(best_quiet_move, bonus);
+        applyContHistUpdate(ply_index, best_quiet_move, bonus);
 
         int qcount = quiet_count_at_ply[ply_index];
         for (int i = 0; i < qcount; i++) {
             int qm = quiet_moves_at_ply[ply_index][i];
             if (qm != best_quiet_move) {
                 updateQuietHistory(qm, -bonus);
+                applyContHistUpdate(ply_index, qm, -bonus);
             }
         }
+    }
+
+    // history_moves와 동일한 gravity 공식으로 continuation history 테이블 한 칸을 갱신한다.
+    private static void updateContHistEntry(int[][] table, int context_idx, int move_idx, int bonus) {
+        if (context_idx < 0) return;
+
+        int clamped_bonus = Math.max(-MAX_HISTORY, Math.min(MAX_HISTORY, bonus));
+        int current = table[context_idx][move_idx];
+
+        table[context_idx][move_idx] =
+                current + clamped_bonus - current * Math.abs(clamped_bonus) / MAX_HISTORY;
+    }
+
+    // 1-ply(상대의 직전 수) / 2-ply(나의 직전 수) continuation history를 함께 갱신한다.
+    // ply_index는 "지금 이 quiet move를 둔 노드"의 ply이며, played_index_at_ply[ply_index]가
+    // 바로 그 노드로 들어오게 만든 직전 수(1-ply back)의 인덱스다.
+    private void applyContHistUpdate(int ply_index, int move, int bonus) {
+        int move_idx = moveIndex(EncodeMove.getMovePiece(move), EncodeMove.getMoveTarget(move));
+
+        if (ply_index >= 1) {
+            updateContHistEntry(cont_hist_1, played_index_at_ply[ply_index], move_idx, bonus);
+        }
+        if (ply_index >= 2) {
+            updateContHistEntry(cont_hist_2, played_index_at_ply[ply_index - 1], move_idx, bonus);
+        }
+    }
+
+    // ScoreMove가 move ordering 점수에 더할 수 있도록 continuation history 조회용으로 공개.
+    // (piece, to)는 "지금 채점하려는 후보 수"의 것이고, 문맥(1-ply/2-ply back)은
+    // 현재 search 인스턴스의 ply 상태에서 자동으로 가져온다.
+    public int getContHistScore(int piece, int to) {
+        int move_idx = moveIndex(piece, to);
+        int score = 0;
+
+        if (ply >= 1) {
+            score += cont_hist_1[played_index_at_ply[ply]][move_idx];
+        }
+        if (ply >= 2) {
+            score += cont_hist_2[played_index_at_ply[ply - 1]][move_idx];
+        }
+        return score;
     }
 
     private int negamax(Chessboard chessboard, int alpha, int beta, int depth) {
@@ -267,6 +329,25 @@ public class Search implements Runnable {
         }
 
         boolean pv_node = beta - alpha > 1;
+
+        // Mate Distance Pruning:
+        // 루트에서 이 노드까지 이미 ply만큼 왔으므로, 아무리 좋아도 "ply수 안에 메이트"보다
+        // 더 좋은 결과는 나올 수 없다(반대로 아무리 나빠도 그보다 나쁠 수도 없다).
+        // alpha/beta를 이 이론적 한계로 좁혀두면, 이미 더 짧은 메이트를 찾은 상태에서
+        // 더 긴 메이트 라인을 굳이 더 파고들지 않고 조기에 잘라낼 수 있다.
+        if (ply > 0) {
+            int mating_value = MATE_VALUE - ply;
+            if (mating_value < beta) {
+                beta = mating_value;
+                if (alpha >= mating_value) return mating_value;
+            }
+
+            int mated_value = -MATE_VALUE + ply;
+            if (mated_value > alpha) {
+                alpha = mated_value;
+                if (beta <= mated_value) return mated_value;
+            }
+        }
 
         int tt_score = TranspositionTable.readHashEntry(this, chessboard, alpha, beta, depth);
         if(ply != 0 && tt_score != TranspositionTable.NO_HASH_ENTRY && !pv_node) {
@@ -393,6 +474,9 @@ public class Search implements Runnable {
             int saved_half_ply = chessboard.half_ply;
 
             ply++;
+            // null move는 실제 기물 이동이 아니므로, 이 ply를 continuation history의
+            // "문맥"으로 쓸 때 진짜 수와 섞이지 않도록 전용 버킷으로 표시해둔다.
+            played_index_at_ply[ply] = NULL_MOVE_INDEX;
 
             if (chessboard.enpassant != no_sq) {
                 chessboard.hash_key ^= Zobrist.enpassant_keys[chessboard.enpassant];
@@ -461,6 +545,18 @@ public class Search implements Runnable {
                 }
             }
 
+            // SEE Pruning:
+            // 얕은 depth에서 "명백히 밑지는" 캡처(SEE < 0, depth가 얕을수록 더 관대한 마진)는
+            // 굳이 재귀 탐색까지 가지 않고 걸러낸다. 첫 수(moves_searched==0, 보통 TT/PV move)는
+            // 안전을 위해 제외하고, PV 노드/체크 상태/메이트 스코어 근처에서는 적용하지 않는다.
+            if (!pv_node && !in_check && is_capture && depth <= 7 && moves_searched > 0
+                    && Math.abs(alpha) < MATE_SCORE) {
+                int see_margin = -90 * depth;
+                if (SEE.see(chessboard, move) < see_margin) {
+                    continue;
+                }
+            }
+
             // 실제로 탐색되는(=LMP로 건너뛰지 않은) quiet move만 gravity/malus 대상으로 기록한다.
             if (!is_capture && quiet_count_at_ply[ply] < MAX_QUIET_TRACKED) {
                 quiet_moves_at_ply[ply][quiet_count_at_ply[ply]++] = move;
@@ -468,6 +564,8 @@ public class Search implements Runnable {
 
             ply++;
             MoveGenerator.makeStandardMove(chessboard, move);
+            // 이 ply로 들어오게 만든 수를 기록해둔다 (자식 노드에서 continuation history 조회 시 사용).
+            played_index_at_ply[ply] = moveIndex(EncodeMove.getMovePiece(move), EncodeMove.getMoveTarget(move));
 
             legal_moves++;
 
@@ -597,6 +695,9 @@ public class Search implements Runnable {
         for (int[] killerMove : killer_moves) Arrays.fill(killerMove, 0);
         for (int[] historyMove : history_moves) Arrays.fill(historyMove, 0);
         for (int[] pvTable : pv_table) Arrays.fill(pvTable, 0);
+        for (int[] row : cont_hist_1) Arrays.fill(row, 0);
+        for (int[] row : cont_hist_2) Arrays.fill(row, 0);
+        Arrays.fill(played_index_at_ply, NULL_MOVE_INDEX);
         Arrays.fill(pv_length, 0);
 
         if (tablebase != null) {

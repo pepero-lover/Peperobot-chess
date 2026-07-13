@@ -59,6 +59,12 @@ public class Evaluate {
     public static int knight_mobility_opening = 4;
     public static int knight_mobility_endgame = 2;
 
+    // 룩은 열린 파일 보너스는 이미 있었지만 mobility(가동성) 항목이 빠져 있었음.
+    // rook_unit은 기준 가동성(대략 절반 정도 열린 상태에서의 평균 공격 칸 수).
+    private static int rook_unit = 7;
+    public static int rook_mobility_opening = 2;
+    public static int rook_mobility_endgame = 4;
+
     public static int space_unit = 6;
 
     public static int UNDEVELOPED_MINOR_PENALTY = 6;
@@ -635,6 +641,10 @@ public class Evaluate {
                             score_opening += open_file_score;
                             score_endgame += open_file_score;
                         }
+
+                        long rook_attacks = Attacks.getRookAttacks(square, both_occupancies) & ~chessboard.occupancies[white];
+                        score_opening += (Long.bitCount(rook_attacks) - rook_unit) * rook_mobility_opening;
+                        score_endgame += (Long.bitCount(rook_attacks) - rook_unit) * rook_mobility_endgame;
                         break;
 
                     case Q:
@@ -712,6 +722,10 @@ public class Evaluate {
                             score_opening -= open_file_score;
                             score_endgame -= open_file_score;
                         }
+
+                        long b_rook_attacks = Attacks.getRookAttacks(square, both_occupancies) & ~chessboard.occupancies[black];
+                        score_opening -= (Long.bitCount(b_rook_attacks) - rook_unit) * rook_mobility_opening;
+                        score_endgame -= (Long.bitCount(b_rook_attacks) - rook_unit) * rook_mobility_endgame;
                         break;
 
                     case q:
@@ -787,40 +801,5 @@ public class Evaluate {
         }
 
         return (chessboard.side == white) ? score : -score;
-    }
-
-    private static int[] savedMatOp, savedMatOpMirror, savedMatEg, savedMatEgMirror;
-    private static int[][] savedPstOp, savedPstEg;
-
-    // pawn~queen(king 제외)의 material/PST를 0으로 밀고 백업
-    public static void zeroTunedMaterialAndPst() {
-        savedMatOp = new int[5]; savedMatOpMirror = new int[5];
-        savedMatEg = new int[5]; savedMatEgMirror = new int[5];
-        savedPstOp = new int[5][]; savedPstEg = new int[5][];
-
-        for (int i = 0; i < 5; i++) {
-            savedMatOp[i] = material_score[OPENING][i];
-            savedMatOpMirror[i] = material_score[OPENING][i + 6];
-            savedMatEg[i] = material_score[ENDGAME][i];
-            savedMatEgMirror[i] = material_score[ENDGAME][i + 6];
-            savedPstOp[i] = positional_score[OPENING][i].clone();
-            savedPstEg[i] = positional_score[ENDGAME][i].clone();
-
-            material_score[OPENING][i] = 0; material_score[OPENING][i + 6] = 0;
-            material_score[ENDGAME][i] = 0; material_score[ENDGAME][i + 6] = 0;
-            java.util.Arrays.fill(positional_score[OPENING][i], 0);
-            java.util.Arrays.fill(positional_score[ENDGAME][i], 0);
-        }
-    }
-
-    public static void restoreTunedMaterialAndPst() {
-        for (int i = 0; i < 5; i++) {
-            material_score[OPENING][i] = savedMatOp[i];
-            material_score[OPENING][i + 6] = savedMatOpMirror[i];
-            material_score[ENDGAME][i] = savedMatEg[i];
-            material_score[ENDGAME][i + 6] = savedMatEgMirror[i];
-            positional_score[OPENING][i] = savedPstOp[i];
-            positional_score[ENDGAME][i] = savedPstEg[i];
-        }
     }
 }

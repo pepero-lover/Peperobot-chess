@@ -334,22 +334,6 @@ public class UCIParse {
                 } catch (NumberFormatException ignored) {}
                 break;
 
-            case "centerpawnbonus":
-                Evaluate.CENTER_PAWN_DUO_BONUS = Integer.parseInt(value);
-                break;
-            case "undevelopedminorpenalty":
-                Evaluate.UNDEVELOPED_MINOR_PENALTY = Integer.parseInt(value);
-                break;
-            case "centralfileholepenalty":
-                Evaluate.CENTRAL_FILE_HOLE_PENALTY = Integer.parseInt(value);
-                break;
-            case "bishoppairbonusopening":
-                Evaluate.bishop_pair_bonus_opening = Integer.parseInt(value);
-                break;
-            case "bishoppairbonusendgame":
-                Evaluate.bishop_pair_bonus_endgame = Integer.parseInt(value);
-                break;
-
             default:
                 break;
         }
