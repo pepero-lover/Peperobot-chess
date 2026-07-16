@@ -20,9 +20,6 @@ public class Main {
             return;
         }
 
-        // init Syzygy endgame table
-        Search.initSyzygy("syzygy/");
-
         // connect to the GUI
         UCIManager.uciLoop();
     }
