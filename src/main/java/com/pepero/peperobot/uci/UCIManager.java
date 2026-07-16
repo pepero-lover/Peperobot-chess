@@ -149,6 +149,11 @@ public class UCIManager {
                 System.out.println("option name SyzygyPath type string default <empty>");
                 System.out.println("option name Move Overhead type spin default 50 min 0 max 5000");
 
+                // correction history 튜닝용 옵션 (SPSA 대상)
+                System.out.println("option name CorrHistMax type spin default 64 min 0 max 400");
+                System.out.println("option name CorrHistWeightScale type spin default 256 min 1 max 4096");
+                System.out.println("option name CorrHistMinDepth type spin default 4 min 0 max 16");
+
                 System.out.println("uciok");
             }
         }

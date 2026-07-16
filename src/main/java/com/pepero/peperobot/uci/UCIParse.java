@@ -334,6 +334,27 @@ public class UCIParse {
                 } catch (NumberFormatException ignored) {}
                 break;
 
+            // correction history: 최대 보정폭 (centipawn)
+            case "corrhistmax":
+                try {
+                    Search.CorrHistMaxCp = Integer.parseInt(value);
+                } catch (NumberFormatException ignored) {}
+                break;
+
+            // correction history: depth 가중치 스케일 (작을수록 더 공격적으로 학습)
+            case "corrhistweightscale":
+                try {
+                    Search.CorrHistWeightScale = Integer.parseInt(value);
+                } catch (NumberFormatException ignored) {}
+                break;
+
+            // correction history: 학습(write)을 적용할 최소 depth
+            case "corrhistmindepth":
+                try {
+                    Search.CorrHistMinDepth = Integer.parseInt(value);
+                } catch (NumberFormatException ignored) {}
+                break;
+
             default:
                 break;
         }

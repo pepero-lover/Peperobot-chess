@@ -18,6 +18,7 @@ import com.pepero.jcb.util.TimeUtils;
 
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.Random;
 
 import net.chesstango.piazzolla.syzygy.Syzygy;
 import net.chesstango.piazzolla.syzygy.SyzygyPosition;
@@ -97,12 +98,107 @@ public class Search implements Runnable {
 
     private int root_ply;
 
+    // ---- Improving flag를 위한 static eval 히스토리 ----
+    // ply-2 시점(직전 자기 차례)의 static eval과 비교해서 "국면이 나아지고 있는지"를 판단한다.
+    // 이 값은 RFP margin 하나에만 쓰인다 (일부러 영향 범위를 최소화해서 격리 테스트).
+    private final int[] static_eval_stack = new int[MAX_PLY + 2];
+
     static {
         for (int depth = 1; depth < 64; depth++) {
             for (int move_count = 1; move_count < 64; move_count++) {
                 reduction_table[depth][move_count] = (int) (0.5 + Math.log(depth) * Math.log(move_count) / 1.95);
             }
         }
+    }
+
+    // ---- Correction History (pawn structure 기반 static eval 보정) ----
+    // static eval은 항상 어느 정도 편향(bias)이 있다. 예를 들어 특정 폰 구조에서는
+    // eval이 체계적으로 낙관적/비관적일 수 있는데, 이런 편향을 "탐색 결과 - static eval"의
+    // 이동평균으로 학습해뒀다가, 다음에 같은 폰 구조를 만나면 static eval에 더해준다.
+    // RFP/futility/improving처럼 static eval을 직접 근거로 쓰는 모든 pruning의 정확도가 올라간다.
+    //
+    // 값은 "실제 centipawn * CORR_HIST_GRAIN" 스케일로 저장해서 정수 연산만으로도
+    // 소수점 정밀도를 확보한다 (gravity 감쇠가 매 업데이트마다 값을 크게 흔들지 않도록).
+    private static final int CORR_HIST_SIZE = 1 << 14;               // 16384, 2의 거듭제곱(인덱스 마스킹용) - 구조적 값, 튜닝 대상 아님
+    private static final int CORR_HIST_GRAIN = 256;                  // 저장 스케일 - 구조적 값, 튜닝 대상 아님
+
+    // ---- 아래 세 값은 UCI setoption으로 런타임에 조정 가능 (SPSA 튜닝 대상) ----
+    // 최대 보정폭 (centipawn 단위, 내부적으로 CORR_HIST_GRAIN을 곱해서 사용)
+    public static volatile int CorrHistMaxCp = 64;
+    // depth가 클수록(=신뢰할수록) 더 크게 반영. 값이 작을수록 더 공격적으로 학습.
+    public static volatile int CorrHistWeightScale = 256;
+    // depth가 이 값보다 얕은 fail-high/최종 반환은 noise가 너무 커서 학습(write)에서 제외한다.
+    // (RFP처럼 검증 없이 즉시 반환하는 pruning이 corr hist를 그대로 신뢰하기 때문에,
+    //  얕은 depth의 우연한 전술 스코어가 같은 폰 구조 전체를 오염시키는 걸 막아야 한다)
+    public static volatile int CorrHistMinDepth = 4;
+
+    // 폰 구조만을 위한 자체 Zobrist 키. 엔진 본체의 hash_key는 기물 종류/캐슬링/앙파상 등
+    // 폰과 무관한 요소까지 섞여 있어서, "같은 폰 구조 = 같은 인덱스"가 보장되지 않는다.
+    // 그래서 폰 비트보드만 반영하는 별도의 랜덤 키 테이블을 둔다. (색상별, 64칸)
+    // 시드를 고정해 재현 가능하게 하고, 스레드 간에는 값만 공유(불변)하므로 안전하다.
+    private static final long[][] PAWN_HASH_KEYS = new long[2][64];
+    static {
+        Random rng = new Random(0x9E3779B97F4A7C15L);
+        for (int side = 0; side < 2; side++) {
+            for (int sq = 0; sq < 64; sq++) {
+                PAWN_HASH_KEYS[side][sq] = rng.nextLong();
+            }
+        }
+    }
+
+    // pawn_corr_hist[side_to_move][pawn_key_index] = 학습된 보정치 (CORR_HIST_GRAIN 스케일)
+    // 다른 history 테이블들과 마찬가지로 워커(스레드)별 인스턴스 필드라 락이 필요 없다.
+    private final int[][] pawn_corr_hist = new int[2][CORR_HIST_SIZE];
+
+    private static long computePawnKey(Chessboard chessboard) {
+        long key = 0L;
+
+        long white_pawns = chessboard.bitboards[P];
+        while (white_pawns != 0L) {
+            int sq = BitBoardUtils.getLS1BIndex(white_pawns);
+            key ^= PAWN_HASH_KEYS[0][sq];
+            white_pawns &= white_pawns - 1L;
+        }
+
+        long black_pawns = chessboard.bitboards[p];
+        while (black_pawns != 0L) {
+            int sq = BitBoardUtils.getLS1BIndex(black_pawns);
+            key ^= PAWN_HASH_KEYS[1][sq];
+            black_pawns &= black_pawns - 1L;
+        }
+
+        return key;
+    }
+
+    // raw static eval에 학습된 보정치를 더해서 돌려준다. in_check일 때는 호출하지 않는다
+    // (static eval 자체가 신뢰 불가하므로 보정도 의미가 없다).
+    private int applyPawnCorrection(int side, int corr_index, int raw_static_eval) {
+        return raw_static_eval + pawn_corr_hist[side][corr_index] / CORR_HIST_GRAIN;
+    }
+
+    // 실제 탐색 결과(best_score)와 raw static eval의 차이를 학습한다.
+    // history_moves/cont_hist와 동일한 gravity 감쇠 공식을 재사용해서, 값이 무한정
+    // 커지지 않고 최근 관측치에 자연히 수렴하게 한다.
+    private void updatePawnCorrHist(int side, int corr_index, int best_score, int raw_static_eval, int depth) {
+        // 메이트(선언)에 가까운 스코어는 "eval이 얼마나 틀렸는지"와 무관한 신호이므로 제외.
+        if (Math.abs(best_score) >= MATE_SCORE) return;
+
+        // depth가 너무 얕으면 이 노드의 스코어 자체가 신뢰하기 어려운 노이즈에 가깝다.
+        // 특히 이 노드가 검증 없이 그대로 반환되는 RFP 등에 corr hist가 쓰이기 때문에,
+        // 얕은 depth의 우연한 값이 같은 폰 구조 전체를 오염시키지 않도록 아예 학습을 건너뛴다.
+        if (depth < CorrHistMinDepth) return;
+
+        int corr_hist_max = CorrHistMaxCp * CORR_HIST_GRAIN;
+        if (corr_hist_max <= 0) return; // UCI로 0 이하를 넣으면 사실상 correction history를 끈 것
+
+        int diff = best_score - raw_static_eval;
+
+        long raw_bonus = (long) diff * depth * CORR_HIST_GRAIN / Math.max(1, CorrHistWeightScale);
+        int bonus = (int) Math.max(-corr_hist_max, Math.min(corr_hist_max, raw_bonus));
+
+        int current = pawn_corr_hist[side][corr_index];
+        pawn_corr_hist[side][corr_index] =
+                current + bonus - current * Math.abs(bonus) / corr_hist_max;
     }
 
     public static void initSyzygy(String syzygyPath) {
@@ -122,7 +218,7 @@ public class Search implements Runnable {
         this.maxDepth = maxDepth;
     }
 
-    private static long getTotalNodes() {
+    public static long getTotalNodes() {
         long total = 0;
         if (workers != null) {
             for (Search worker : workers) {
@@ -162,6 +258,14 @@ public class Search implements Runnable {
                 chessboard.side ^ 1);
 
         int evaluation = Evaluate.evaluate(chessboard);
+
+        // Correction history 보정 (읽기 전용): QS는 depth=0이라 별도 학습(write)은 하지 않고,
+        // 본탐색(negamax)에서 학습된 값을 stand-pat 정확도를 높이는 데만 사용한다.
+        if (!in_check) {
+            long qs_pawn_key = computePawnKey(chessboard);
+            int qs_corr_index = (int) (qs_pawn_key & (CORR_HIST_SIZE - 1));
+            evaluation = applyPawnCorrection(chessboard.side, qs_corr_index, evaluation);
+        }
 
         if (!in_check) {
             if (evaluation >= beta) {
@@ -457,12 +561,28 @@ public class Search implements Runnable {
                     chessboard.bitboards[r] | chessboard.bitboards[q]) != 0;
         }
 
-        int static_eval = Evaluate.evaluate(chessboard);
+        int raw_static_eval = Evaluate.evaluate(chessboard);
+
+        // Correction History 적용: 같은 폰 구조에서 과거 탐색 결과들이 static eval을
+        // 평균적으로 어느 방향으로 얼마나 벗어났는지 학습해둔 보정치를 더한다.
+        // in_check 노드는 애초에 static eval을 신뢰하지 않으므로 계산을 건너뛴다.
+        int side_to_move = chessboard.side;
+        long pawn_key = in_check ? 0L : computePawnKey(chessboard);
+        int pawn_corr_index = (int) (pawn_key & (CORR_HIST_SIZE - 1));
+        int static_eval = in_check ? raw_static_eval
+                : applyPawnCorrection(side_to_move, pawn_corr_index, raw_static_eval);
+
+        // 이 ply의 static eval을 기록해두고, 2-ply 전(직전 자기 차례) 대비 나아지고 있는지 판단한다.
+        // in_check일 때는 static eval이 신뢰할 수 없으므로 improving 계산에서 제외한다.
+        static_eval_stack[ply] = static_eval;
+        boolean improving = !in_check && ply >= 2 && static_eval > static_eval_stack[ply - 2];
 
         int king_danger = Evaluate.getKingSafetyPenalty(chessboard, chessboard.side);
 
         if (depth <= 5 && !in_check && !pv_node && Math.abs(beta) < MATE_SCORE) {
-            int rfp_margin = 120 * depth;
+            // improving(국면이 나아지는 중)이면 static eval을 더 신뢰할 수 있으므로
+            // 조금 더 작은 마진으로도 fail-high 컷을 허용한다. (스윙을 20/depth로 작게 잡아 보수적으로 시작)
+            int rfp_margin = (improving ? 100 : 120) * depth;
             if (static_eval - rfp_margin >= beta) {
                 return static_eval;
             }
@@ -646,6 +766,12 @@ public class Search implements Runnable {
                         killer_moves[1][ply] = killer_moves[0][ply];
                         killer_moves[0][ply] = move;
                     }
+
+                    // fail-high로 얻은 score(클램프되지 않은 원값)와 raw static eval의 차이를 학습.
+                    if (!in_check) {
+                        updatePawnCorrHist(side_to_move, pawn_corr_index, score, raw_static_eval, depth);
+                    }
+
                     return beta;
                 }
             }
@@ -666,6 +792,14 @@ public class Search implements Runnable {
         if (hash_flag == TranspositionTable.HASH_FLAG_EXACT && tt_best_move != 0
                 && !EncodeMove.getMoveCapture(tt_best_move)) {
             applyQuietHistoryUpdate(ply, tt_best_move, historyBonus(depth) / 2);
+        }
+
+        // 이 노드가 fail-high 없이 끝난 경우(EXACT 또는 fail-low)도 alpha를 "이 노드에서 확인된
+        // 최선의 근사 스코어"로 보고 학습에 반영한다. fail-low(alpha == alpha_orig)일 때는 실제
+        // 참값이 alpha보다 낮을 수 있어 다소 노이즈가 있지만, gravity 감쇠 덕분에 다수 샘플에
+        // 걸쳐 평균적으로는 여전히 유효한 신호가 된다.
+        if (!in_check) {
+            updatePawnCorrHist(side_to_move, pawn_corr_index, alpha, raw_static_eval, depth);
         }
 
         TranspositionTable.writeHashEntry(this, chessboard, alpha, depth, hash_flag, tt_best_move);
@@ -697,8 +831,10 @@ public class Search implements Runnable {
         for (int[] pvTable : pv_table) Arrays.fill(pvTable, 0);
         for (int[] row : cont_hist_1) Arrays.fill(row, 0);
         for (int[] row : cont_hist_2) Arrays.fill(row, 0);
+        for (int[] row : pawn_corr_hist) Arrays.fill(row, 0);
         Arrays.fill(played_index_at_ply, NULL_MOVE_INDEX);
         Arrays.fill(pv_length, 0);
+        Arrays.fill(static_eval_stack, 0);
 
         if (tablebase != null) {
             long whiteBB = chessboard.bitboards[P] | chessboard.bitboards[N] | chessboard.bitboards[B] |
