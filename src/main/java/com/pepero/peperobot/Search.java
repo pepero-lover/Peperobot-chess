@@ -428,7 +428,7 @@ public class Search implements Runnable {
 
         pv_length[ply] = ply;
 
-        if(ply != 0 && ChessboardUtils.isRepetitionDraw(chessboard, root_ply)){
+        if(ply != 0 && ChessboardUtils.isRepetitionDraw(chessboard, root_ply) && chessboard.half_ply >= 100){
             return 0;
         }
 
