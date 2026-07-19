@@ -28,7 +28,7 @@ import static com.pepero.jcb.constant.EncodedPieces.*;
 import static com.pepero.jcb.constant.SideToMove.*;
 
 public class Search implements Runnable {
-    public static int MAX_THREADS = 1;
+    public static int MAX_THREADS = 2;
     private static Search[] workers;
 
     public static final int MAX_PLY = 256;
@@ -915,8 +915,32 @@ public class Search implements Runnable {
         int last_best_move = 0;
         int fail_count = 0;
 
-        for (int current_depth = 1; current_depth <= maxDepth; current_depth++) {
+        // ---- Lazy SMP 다양화 (diversification) ----
+        // helper 스레드(threadId != 0)가 메인 스레드와 완전히 동일한 depth를
+        // 동일한 aspiration window로 훑으면, TT의 같은 인덱스에 거의 같은 타이밍에
+        // 몰려서 캐시라인 경합(contention)만 늘고 새로운 정보를 거의 못 준다.
+        // 아래 두 가지로 스레드마다 "다른 경로"를 타게 만든다:
+        //   1) depth skip: 일부 depth를 건너뛰어 스레드마다 서로 다른 시점에
+        //      서로 다른 depth를 먼저 보게 한다.
+        //   2) aspiration window base 오프셋: 스레드마다 초기 window 폭을 다르게 해서
+        //      fail-high/low 재탐색 패턴이 갈라지게 한다.
+        int skip_size = (threadId == 0) ? 1 : 1 + (threadId % 4);          // 1(=끄기),2,3,4 순환
+        int skip_phase = (skip_size <= 1) ? 0 : (threadId / 4) % skip_size;
+        int base_window = VAL_WINDOW + (threadId % 3) * 25;                // 스레드별 window 폭 차등
+
+        // helper 스레드는 메인 스레드의 소프트 타임리밋(수읽기 흔들림에 따른 조기 종료)에
+        // 얽매이지 않고, 공유 hard-stop(TimeControlVariables.stopped)이 켜질 때까지
+        // 계속 파고들며 TT를 채운다. 그만큼 조금 더 깊은 depth까지 진행할 여지를 준다.
+        int effective_max_depth = (threadId == 0) ? maxDepth : Math.min(maxDepth + 6, MAX_PLY - 8);
+
+        for (int current_depth = 1; current_depth <= effective_max_depth; current_depth++) {
             if (TimeControlVariables.stopped) break;
+
+            // 이 스레드가 건너뛰기로 한 depth라면, negamax를 호출하지 않고 바로 다음 depth로.
+            // (aspiration 재탐색 도중엔 이 지점에 다시 오지 않으므로 fail-widen 로직과 충돌 없음)
+            if (skip_size > 1 && current_depth > 1 && ((current_depth + skip_phase) % skip_size == 0)) {
+                continue;
+            }
 
             follow_pv = true;
             score = negamax(chessboard, alpha, beta, current_depth);
@@ -927,8 +951,8 @@ public class Search implements Runnable {
 
             if (score <= alpha || score >= beta) {
                 fail_count++;
-                // 실패할 때마다 창을 지수적으로 넓힌다 (VAL_WINDOW * 2, 4, 8, 16, 32...)
-                int expand = VAL_WINDOW * (1 << Math.min(fail_count, 5));
+                // 실패할 때마다 창을 지수적으로 넓힌다 (base_window * 2, 4, 8, 16, 32...)
+                int expand = base_window * (1 << Math.min(fail_count, 5));
 
                 if (score <= alpha) {
                     alpha = Math.max(-INFINITY, alpha - expand);
@@ -940,8 +964,8 @@ public class Search implements Runnable {
             }
 
             fail_count = 0;
-            alpha = score - VAL_WINDOW;
-            beta = score + VAL_WINDOW;
+            alpha = score - base_window;
+            beta = score + base_window;
 
             if (threadId == 0) {
                 long stop_time = TimeUtils.getTimeMs();
@@ -971,7 +995,10 @@ public class Search implements Runnable {
                 best_move = pv_table[0][0];
             }
 
-            if (TimeControlVariables.timeset) {
+            // 소프트 타임리밋(수읽기 흔들림 기반 조기 종료)은 메인 스레드(threadId 0)만 적용한다.
+            // helper 스레드까지 똑같이 일찍 멈추면 그만큼 TT에 깊은 정보를 못 채우고 놀게 되므로,
+            // helper 스레드는 hard stop(TimeControlVariables.stopped)이 켜질 때까지 계속 파고든다.
+            if (threadId == 0 && TimeControlVariables.timeset) {
                 int current_best_move = pv_table[0][0];
                 long elapsedTime = TimeUtils.getTimeMs() - TimeControlVariables.starttime;
 
@@ -985,6 +1012,16 @@ public class Search implements Runnable {
 
                 last_best_move = current_best_move;
             }
+        }
+
+        // 메인 스레드(threadId 0)의 반복심화가 끝났다면(=maxDepth 도달, 소프트/하드 타임리밋),
+        // 최종 결과는 이미 확정된 것이다. 이 시점부터 helper 스레드가 계속 더 깊이 파고들어봐야
+        // (특히 timeset이 꺼진 "go depth N" 같은 고정 depth 탐색에서는 시간으로 멈출 방법이
+        // 아예 없으므로) searchPosition()의 join()이 helper 스레드가 훨씬 더 깊은 depth를
+        // 끝낼 때까지 하염없이 기다리게 된다. 그래서 메인이 끝나는 즉시 공유 stop 플래그를
+        // 세워서 helper 스레드들도 다음 노드 카운트 체크 지점에서 바로 멈추게 한다.
+        if (threadId == 0) {
+            TimeControlVariables.stopped = true;
         }
     }
 
