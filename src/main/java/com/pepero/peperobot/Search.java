@@ -28,7 +28,7 @@ import static com.pepero.jcb.constant.EncodedPieces.*;
 import static com.pepero.jcb.constant.SideToMove.*;
 
 public class Search implements Runnable {
-    public static int MAX_THREADS = 2;
+    public static int MAX_THREADS = 1;
     private static Search[] workers;
 
     public static final int MAX_PLY = 256;
