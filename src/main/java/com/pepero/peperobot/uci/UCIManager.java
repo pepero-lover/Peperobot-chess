@@ -180,7 +180,7 @@ public class UCIManager {
         // one thread
         Search.MAX_THREADS = 1;
 
-        Search warmupSearch = new Search(1, dummy, MAX_PLY);
+        Search warmupSearch = new Search(0, dummy, MAX_PLY);
         warmupSearch.run();
 
         Search.MAX_THREADS = savedThreads;
